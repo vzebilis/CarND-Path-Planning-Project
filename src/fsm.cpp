@@ -50,6 +50,7 @@ static vector<double> computePolyCoefficients(TrajData & traj_data)
   return {ss, ssd, ssdd * 0.5, a345[0], a345[1], a345[2]};
 }
 
+
 // Transform from Frenet s coordinate to Cartesian x,y using Splines.
 // d_offset is the lane offset (2: left lane, 6: middle lane, 10: right lane)
 vector<double> FSM::getXYfromSpline(double s, double d_offset)
@@ -72,7 +73,7 @@ vector<double> FSM::getXYfromSpline(double s, double d_offset)
   double seg_y  = spd_.sy(s);
   double seg_dx = spd_.sdx(s);
   double seg_dy = spd_.sdy(s);
-  double d = sqrt(pow(seg_dx, 2) + pow(seg_dy, 2)) * d_offset; // Middle lane
+  double d = sqrt(pow(seg_dx, 2) + pow(seg_dy, 2)) * d_offset; // Chosen lane
 
   double perp_heading = heading-pi()/2;
 
@@ -83,9 +84,16 @@ vector<double> FSM::getXYfromSpline(double s, double d_offset)
 }
 
 FSM::FSM(const Map & map) : 
-  policy_(MATCH_SPEED), prev_acc_(TRAJ_STEPS, 0), prev_speed_(TRAJ_STEPS, 0), map_(map), prev_trg_speed_(0),
-  cur_traj_idx_(0), delta_speed_to_zero_acc_(0)
+  policy_(KEEP_LANE), prev_policy_(KEEP_LANE), prev_acc_(TRAJ_STEPS, 0), prev_speed_(TRAJ_STEPS, 0), map_(map), 
+  prev_trg_speed_(0), cur_traj_idx_(0), delta_speed_to_zero_acc_(0)
 {
+  static_assert(STARTING_LANE == 2 or STARTING_LANE == 6 or STARTING_LANE == 10);
+  // Set current lane based on STARTING_LANE constexpr
+  if (STARTING_LANE == 2) lane_ = LEFT;
+  else if (STARTING_LANE == 6) lane_ = CENTER;
+  else lane_ = RIGHT;
+
+  // Generate the full track splines
   generateFullSplines();
 
   // Compute some const information
@@ -109,7 +117,8 @@ void FSM::generateFullSplines()
 
 // Method to compute and return the minimum amount of road length and time
 // it would take to acceleratate to target speed with 0 final acceleration
-TrajData FSM::computeMatchTargetSpeed(double init_s, double init_speed, double init_acc, double trg_speed) 
+TrajData FSM::computeMatchTargetSpeed(double init_s, double init_d, double init_speed, double init_acc, 
+                                      double final_d, double trg_speed) 
 {
   assert(init_s     >= 0);
   assert(init_speed >= 0);
@@ -119,10 +128,8 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_speed, double i
 
   TrajData ret; 
   ret.final_speed         = init_speed; // default return value
-
-  //double delta_speed      = trg_speed - init_speed;
-  //bool accel              = delta_speed > 0;
-  //delta_speed             = fabs(delta_speed);
+  ret.init_d              = init_d;     
+  ret.final_d             = final_d;     
 
   // If we are already at the target speed, with zero acceleration, then nothing to do
   if (isZero(trg_speed - init_speed) and isZero(init_acc)) return ret;
@@ -138,13 +145,9 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_speed, double i
     a_shed               += a_jerk * TIME_RES;
     delta_speed_shed     += a_shed * TIME_RES;
   }
-  // Update the desired delta_speed
-  //delta_speed            += delta_speed_shed;
-  //if (delta_speed < 0) accel = false;
   const bool accel = trg_speed - init_speed + delta_speed_shed >= 0;
 
   // The flip point: speed at which to switch from accelerating to decelerating or vice versa
-  //double flip_point = delta_speed / 2;
   double flip_point = init_speed + (trg_speed - init_speed + delta_speed_shed) / 2;
   double T = 0;
   double S = init_s;
@@ -158,14 +161,6 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_speed, double i
     T           += TIME_RES;
     S           += cur_speed * TIME_RES;
     cur_speed   += cur_acc * TIME_RES;
-    //if (cur_speed > MAX_SPEED) cur_speed = MAX_SPEED;
-    //else if (cur_speed < 0)    cur_speed = 0;
-    //double dv    = cur_acc * TIME_RES;
-    //if (cur_speed + dv > MAX_SPEED) dv = MAX_SPEED - cur_speed;
-    //else if (cur_speed + dv < 0)    dv = -cur_speed;
-    //delta_speed -= dv;
-    //cur_speed   += dv;
-    //jerk         = (delta_speed > flip_point)? jerk: -jerk;
     bool flipped = (accel)? cur_speed > flip_point: cur_speed < flip_point;
     double jerk  = (accel)? MAX_JERK: -MAX_JERK;
     jerk         = (flipped)? -jerk: jerk;
@@ -189,136 +184,230 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_speed, double i
   return ret;
 }
 
-// Method to compute and return the minimum amount of road length and time
-// it would take to acceleratate to target speed with 0 final acceleration
-//TrajData FSM::computeAccelerateToTrgSpeed(double init_s, double init_speed, double init_acc, double trg_speed) 
-//{
-//  // How many timesteps do we need at least to shed our initial acceleration?
-//  int shed_acc_steps      = ceil((fabs(init_acc) / MAX_JERK) / TIME_RES);
-//  double delta_speed      = trg_speed - init_speed;
-//  double delta_speed_shed = 0;
-//  double a_shed           = 0;
-//  // How much speed are we going to add while shedding initial acceleration?
-//  for (int i = 0; i < shed_acc_steps; ++i) {
-//    a_shed += MAX_JERK * TIME_RES;
-//    delta_speed_shed += a_shed * TIME_RES;
-//  }
-//  // Update the desired delta_speed
-//  delta_speed -= delta_speed_shed;
-//  // The flip point, to go from accelerating to decelerating
-//  // is the new delta_speed / 2
-//  double flip_point = (delta_speed > 0)? delta_speed / 2: 0;
-//  double T = 0;
-//  double S = init_s;
-//  double cur_speed = init_speed;
-//  double cur_acc = init_acc;
-//  while (cur_speed < trg_speed) {
-//    std::cout << "Cur speed: " << cur_speed << " Cur acc: " << cur_acc << " Cur S: " << S <<
-//                 " Flip point: " << flip_point << std::endl;
-//    T          += TIME_RES;
-//    S          += cur_speed * TIME_RES;
-//    cur_speed  += cur_acc * TIME_RES;
-//    if (cur_speed > MAX_SPEED) cur_speed = MAX_SPEED;
-//    double jerk = ((trg_speed - cur_speed) > flip_point)? MAX_JERK: -MAX_JERK;
-//    cur_acc    += jerk * TIME_RES;
-//    if (cur_acc > MAX_ACC) {
-//      cur_acc = MAX_ACC;
-//      // Update flip point as well
-//      flip_point = delta_speed_to_zero_acc_;
-//    }
-//    if (cur_acc < 0) {
-//      cur_acc = 0;
-//      break;
-//    }
-//  }
-//
-//  TrajData ret;
-//  ret.init_s      = init_s;
-//  ret.init_speed  = init_speed;
-//  ret.init_acc    = init_acc;
-//  ret.final_s     = S;
-//  ret.final_speed = trg_speed;
-//  ret.final_acc   = cur_acc;
-//  ret.time        = T;
-//
-//  return ret;
-//}
-
 void FSM::computeTrajectory(TrajData & traj_data)
 {
+  assert(traj_data.time);
   forward_traj_.clear();
-  cur_traj_idx_ = 0;
-  auto coeffs = computePolyCoefficients(traj_data);
+  cur_traj_idx_  = 0;
+  auto coeffs    = computePolyCoefficients(traj_data);
   // Generate trajectory until we reach the required time
-  double time = TIME_RES;
-  while (time < traj_data.time) {
+  double time    = TIME_RES;
+  // Calculate step for D if there is a significant difference
+  double diff_d  = traj_data.final_d - traj_data.init_d;
+  double step_d  = (fabs(diff_d) < 3)? 0: diff_d / (traj_data.time / TIME_RES);
+  if (DEBUG) std::cout << "computeTrajectory. diff_d: " << diff_d << " step_d: " << step_d << " time: " <<  traj_data.time << std::endl;
+  double new_d   = traj_data.init_d + step_d;
+  while (time <= traj_data.time) {
     forward_traj_.emplace_back();
-    auto & ft = forward_traj_.back();
+    auto & ft    = forward_traj_.back();
     double new_s = getBestStep(coeffs, time);
-    new_s = fmod(new_s, MAX_S);
-    auto vecXY = getXYfromSpline(new_s, 6);
-    ft.x = vecXY[0];
-    ft.y = vecXY[1];
-    ft.s = new_s;
-    time += TIME_RES;
+    new_s        = fmod(new_s, MAX_S);
+    //auto vecXY   = step_d? getXYfromSplineNew(new_s, new_d): getXYfromSpline(new_s, new_d);
+    auto vecXY   = getXYfromSpline(new_s, new_d);
+    ft.x         = vecXY[0];
+    ft.y         = vecXY[1];
+    ft.s         = new_s;
+    ft.d         = new_d;
+    time        += TIME_RES;
+    new_d       += step_d;
   }
 }
 
-static SensorData getSensorFusion(State & st)
+//
+// Function to return the closest car ahead 
+//
+static SensorData getSensorFusion(State & st, bool ahead, double d_offset)
 {
+  static constexpr double HALF_LANE_WIDTH = LANE_WIDTH / 2;
   // Get data for car closest to us in s, going forward
-  int best_idx  = -1;
-  double best_s = MAX_S;
+  int min_idx  = -1;
+  double min_diff_s = MAX_S;
   for (int i = 0; i < st.sensor_fusion.size(); ++i) {
-    // Only interested about cars in the same lane
+    // Only interested about cars in the same lane for the given offset
     double cur_d = st.sensor_fusion[i][6]; // get the d value
-    if (cur_d < st.d - 2 or cur_d > st.d + 2) continue;
+    if (cur_d < st.d + d_offset - HALF_LANE_WIDTH or 
+        cur_d > st.d + d_offset + HALF_LANE_WIDTH) continue;
 
+    double st_s   = st.s;
+    double cur_s  = st.sensor_fusion[i][5]; // get the s value
+
+    // Handle wraparound
+    if (ahead) {
+      if (cur_s < st_s) cur_s += MAX_S;
+    } else {
+      if (cur_s > st_s) st_s  += MAX_S; 
+    }
+    
     // Only interested about cars in a reasonable distance
-    double cur_s = st.sensor_fusion[i][5]; // get the s value
-    if (cur_s < st.s) cur_s += MAX_S; // wraparound
-    if (cur_s - st.s > 50) continue;
+    double diff_s = fabs(cur_s - st_s);
+    if (diff_s > SENSOR_MAX_DIST) continue;
 
-    if (cur_s - st.s < best_s) {
-      best_s   = cur_s - st.s;
-      best_idx = i;
+    if (diff_s < min_diff_s) {
+      min_diff_s  = diff_s;
+      min_idx     = i;
     }
   }
   SensorData sd; 
+  sd.diff_s = min_diff_s;
   // Are there any cars detectable in front of us?
-  if (best_idx == -1 ) {
+  if (min_idx == -1) {
     sd.s = -1;
+    sd.d = st.d;
     return sd;
   }
-  sd.id = st.sensor_fusion[best_idx][0];
-  sd.x  = st.sensor_fusion[best_idx][1];
-  sd.y  = st.sensor_fusion[best_idx][2];
-  sd.vx = st.sensor_fusion[best_idx][3];
-  sd.vy = st.sensor_fusion[best_idx][4];
-  sd.s  = st.sensor_fusion[best_idx][5];
-  sd.d  = st.sensor_fusion[best_idx][6];
+  sd.id = st.sensor_fusion[min_idx][0];
+  sd.x  = st.sensor_fusion[min_idx][1];
+  sd.y  = st.sensor_fusion[min_idx][2];
+  sd.vx = st.sensor_fusion[min_idx][3];
+  sd.vy = st.sensor_fusion[min_idx][4];
+  sd.v  = sqrt(pow(sd.vx, 2) + pow(sd.vy, 2));
+  sd.s  = st.sensor_fusion[min_idx][5];
+  sd.d  = st.sensor_fusion[min_idx][6];
   return sd;
+}
+
+static std::pair<double, double> getTimeToIntercept(double dist, double speed, double trg_speed) 
+{
+  assert(speed > trg_speed);
+  double time = 0;
+  double trav = 0;
+  while (dist > 0) {
+    trav += speed * TIME_RES;
+    dist -= (speed - trg_speed) * TIME_RES;
+    time += TIME_RES;
+  }
+  return {time, trav};
+}
+
+//
+// Function to check which of the available lanes is best to use
+//
+SensorData FSM::checkLanes(State & st)
+{
+  if (DEBUG) std::cout << "checkLanes: current lane: " << lane_ << std::endl;
+  // Check same lane
+  SensorData best = getSensorFusion(st, true, 0); best.d = st.d;
+  // TODO: Check if it makes sense to switch back to center lane (to have more options later)
+  if (best.s == -1)  {
+    if (DEBUG) std::cout << "Staying in the same lane, since there is no car there\n";
+    return best;
+  }
+  if (DEBUG) std::cout << "Car in the same lane: " << best.id << " s: " << best.s << " d: " << best.d << " v: " << best.v << std::endl;
+
+  // Check right lane
+  if (lane_ == LEFT or lane_ == CENTER) {
+    auto right_ahead = getSensorFusion(st, true,  4);
+    auto right_backw = getSensorFusion(st, false, 4);
+    // Check if there is enough space
+    if (right_ahead.diff_s > FRONT_CAR_MAR and right_backw.diff_s > FRONT_CAR_MAR) {
+      // If there are no cars present ahead right or if their speed is higher than the best, chose right
+      if (right_ahead.s == -1 or best.v < 0.9 * right_ahead.v) {
+        best = right_ahead;
+        best.d = (lane_ == LEFT)? 6: 10;
+        policy_ = MOVE_RIGHT;
+        if (best.s == -1)  {
+          if (DEBUG) std::cout << "Moving to right lane, since there is no car there\n";
+          return best;
+        }
+        if (DEBUG) std::cout << "Car in our right lane: " << best.id << " s: " << best.s << " d: " << best.d << 
+                     " v: " << best.v << std::endl;
+      }
+    }
+  }
+
+  // Check left lane
+  if (lane_ == RIGHT or lane_ == CENTER) {
+    auto left_ahead = getSensorFusion(st, true,  -4);
+    auto left_backw = getSensorFusion(st, false, -4);
+    // Check if there is enough space
+    if (left_ahead.diff_s > FRONT_CAR_MAR and left_backw.diff_s > FRONT_CAR_MAR) {
+      // If there are no cars present ahead left or if their speed is higher than the best, chose left
+      if (left_ahead.s == -1 or best.v < 0.9 * left_ahead.v) {
+        best = left_ahead;
+        policy_ = MOVE_LEFT;
+        best.d = (lane_ == RIGHT)? 6: 2;
+        if (best.s == -1)  {
+          if (DEBUG) std::cout << "Moving to left lane, since there is no car there\n";
+          return best;
+        }
+        if (DEBUG) std::cout << "Car in our left lane: " << best.id << " s: " << best.s << " d: " << best.d << 
+                     " v: " << best.v << std::endl;
+      }
+    }
+  }
+
+  if (DEBUG) std::cout << "Applying policy: " << policy_ << std::endl;
+  return best;
 }
 
 // Compute target speed, based on two cases
 // i.  if we are currently keeping a steady speed
 // ii. if we are still in the middle of a maneuver
-TrajData FSM::computeTargetSpeed(double init_s, double init_speed, double init_acc, SensorData & sd)
+TrajData FSM::computeTargetSpeed(double init_s, double init_d, double init_speed, double init_acc, SensorData & sd)
 {
   // Default TrajData to return
-  TrajData td;
+  TrajData td; 
+  td.init_s      = init_s;
+  td.init_d      = init_d;
+  td.init_speed  = init_speed;
+  td.init_acc    = init_acc;
+  td.final_d     = init_d;
+
+  td.final_speed = prev_trg_speed_; // This marks the default return value
+
+  // If changing lanes complete lane change fast
+  if (fabs(init_d - sd.d) > 3) {
+    td.time        = 1.5; //4 / (0.3 * init_speed); // time to switch lanes
+    td.final_s     = init_s + init_speed * td.time; // distance travelled 
+    td.final_d     = sd.d;
+    td.final_speed = init_speed;
+    if (DEBUG) std::cout << "Changing lanes from d: " << td.init_d << " to d: " << td.final_d << " in time: " << td.time << 
+                 " and s: " << (init_speed * td.time) << std::endl;
+    return td;
+  }
 
   // If no car spotted, go to max speed
+  static double prev_sd_s = MAX_S;
   if (sd.s == -1) {
+    if (prev_sd_s == -1) return td;
     if (DEBUG) std::cout << "Setting target speed back to MAX\n";
-    return computeMatchTargetSpeed(init_s, init_speed, init_acc, MAX_SPEED * MAX_SPEED_MAR);
+    prev_sd_s = sd.s;
+    return computeMatchTargetSpeed(init_s, init_d, init_speed, init_acc, sd.d, MAX_SPEED * MAX_SPEED_MAR);
   } 
 
+  prev_sd_s = sd.s;
+
   // Compute target speed
-  double car_s     = sd.s;
-  if (car_s < init_s) car_s += MAX_S;
-  double trg_speed = sqrt(pow(sd.vx, 2) + pow(sd.vy, 2)) * MPH2MPS;
+  double trg_speed = sd.v; //sqrt(pow(sd.vx, 2) + pow(sd.vy, 2));
   trg_speed        = fmin(trg_speed, MAX_SPEED * MAX_SPEED_MAR);
+  if (init_speed < trg_speed) return td;
+
+  double car_s     = sd.s - FRONT_CAR_MAR;
+  if (car_s < init_s) car_s += MAX_S;
+
+  td = computeMatchTargetSpeed(init_s, init_d, init_speed, init_acc, sd.d, trg_speed);
+  // Accelerate
+  if (trg_speed >= init_speed) return td;
+
+  // Decelerate more smoothly if we have enough space/time to do it
+  double car_future_s = car_s + td.time * trg_speed;
+
+  // If there is no time to stop before a collision, violate constraints to do so properly
+  if (td.final_s > car_future_s) {
+    td.final_s = car_future_s;  
+    return td;
+  }
+
+  td.time += (car_future_s - td.final_s) / init_speed;
+  td.final_s = car_future_s;
+
+  //auto time_trav = getTimeToIntercept(car_s - init_s, init_speed, trg_speed);
+  //if (DEBUG) std::cout << "Time to intercept car: " << time_trav.first << " and s: " << time_trav.second << std::endl;
+  //td.final_s     = init_s + time_trav.second;
+  //td.final_speed = trg_speed;
+  //td.time        = time_trav.first;
+  return td;
+/*
   double delta_v   = trg_speed - init_speed;
 
   // If we are already close to the target speed, with a steady speed, do not alter course
@@ -329,7 +418,7 @@ TrajData FSM::computeTargetSpeed(double init_s, double init_speed, double init_a
   //}
 
   // Compute a trial trajectory to see at what s and time we will have matched car speed
-  td = computeMatchTargetSpeed(init_s, init_speed, init_acc, trg_speed);
+  td = computeMatchTargetSpeed(init_s, init_d, init_speed, init_acc, sd.d, trg_speed);
   // If we don't have enought time to stop, violate acceleration constraints
   double car_future_s = car_s + td.time * trg_speed;
   // Keep a safety margin from the car in front
@@ -352,7 +441,7 @@ TrajData FSM::computeTargetSpeed(double init_s, double init_speed, double init_a
       trg_s = td.final_s;
     // Otherwise try to see if accelerating past it is possible
     } else {
-      //auto td2 = computeMatchTargetSpeed(init_s, init_speed, init_acc, trg_speed);
+      //auto td2 = computeMatchTargetSpeed(init_s, init_d, init_speed, init_acc, trg_speed);
       // TODO: for now keeping conservative speed
       trg_s = td.final_s;
     }
@@ -360,6 +449,18 @@ TrajData FSM::computeTargetSpeed(double init_s, double init_speed, double init_a
 
   td.final_s = trg_s;
   return td;
+*/
+}
+
+//
+// Method to update the internal lane state
+//
+void FSM::updateLane(double d)
+{
+  assert(d >= 0 and d <= 12);
+  if (d >= 0 and d < 4) lane_ = LEFT;
+  else if (d >= 4 and d < 8) lane_ = CENTER;
+  else if (d >= 8 and d < 12) lane_ = RIGHT;
 }
 
 //
@@ -379,16 +480,19 @@ void FSM::update(State & st)
 
   SensorData sd;
   // Get sensor data
-  if (sz) {
-    sd = getSensorFusion(st);
-    if (sd.s != -1) {
-      if (DEBUG) {
-        double tot_speed  = sqrt(pow(sd.vx, 2) + pow(sd.vy, 2)) * MPH2MPS;
-        std::cout << "Spotted closest car ahead in the same lane at S: " << sd.s << " D: " << sd.d << 
-          " VX: " << sd.vx << " VY: " << sd.vy << " TotalSpeed: " << tot_speed << std::endl;
+  if (policy_ == KEEP_LANE) {
+    if (sz) {
+      // Check to see which lane we should go in
+      sd = checkLanes(st);
+      //sd = getSensorFusion(st, true, 0);
+      if (sd.s != -1) {
+        if (DEBUG) {
+          std::cout << "Spotted closest car ahead at S: " << sd.s << " D: " << sd.d << 
+            " VX: " << sd.vx << " VY: " << sd.vy << " TotalSpeed: " << sd.v << std::endl;
+        }
+      } else {
+        if (DEBUG) std::cout << "No car spotted in the same lane!\n";
       }
-    } else {
-      if (DEBUG) std::cout << "No car spotted in the same lane!\n";
     }
   }
 
@@ -399,6 +503,7 @@ void FSM::update(State & st)
   double last_x_processed     = sz? next_x_vals_[processed -1]: st.x;
   double last_y_processed     = sz? next_y_vals_[processed -1]: st.y;
   double last_s_processed     = sz? next_s_vals_[processed -1]: st.s;
+  double last_d_processed     = sz? next_d_vals_[processed -1]: STARTING_LANE; // Start out in the middle lane
   double last_speed_processed = sz? prev_speed_[processed -1]: 0;
   double last_acc_processed   = sz? prev_acc_[processed -1]: 0;
 
@@ -410,6 +515,7 @@ void FSM::update(State & st)
     next_y_vals_.insert(next_y_vals_.begin(), st.path_y.begin(), st.path_y.end());
     // Erase processed first elements 
     next_s_vals_.erase(next_s_vals_.begin(), next_s_vals_.begin() + processed);
+    next_d_vals_.erase(next_d_vals_.begin(), next_d_vals_.begin() + processed);
     prev_acc_.erase(prev_acc_.begin(), prev_acc_.begin() + processed);
     prev_speed_.erase(prev_speed_.begin(), prev_speed_.begin() + processed);
   }
@@ -417,9 +523,6 @@ void FSM::update(State & st)
   if (DEBUG) {
     std::cout << "=======================================================================\n";
     std::cout << "Processed: " << (sz? std::to_string(processed): "N/A") << std::endl;
-  }
-
-  if (DEBUG) {
     static int stepCnt = 0;
     static double last_st_s     = st.s;
     static double last_st_speed = 0;
@@ -430,97 +533,126 @@ void FSM::update(State & st)
     last_st_speed     = st_speed_i;
     last_st_s         = st.s;
     stepCnt += (sz)? processed: 0;
-    std::cout << "[Step " << stepCnt << "] Current given state (s,end_s,x,y,speed,speed_i,acc): (" << st.s << 
-      ", " << st_end_s << ", " << st.x << ", " << st.y << ", " << st_speed << ", " << st_speed_i <<
+    std::cout << "[Step " << stepCnt << "] Current given state (s,d,end_s,x,y,speed,speed_i,acc): (" << st.s << 
+      ", " << st.d << ", " << st_end_s << ", " << st.x << ", " << st.y << ", " << st_speed << ", " << st_speed_i <<
       ", " << st_acc << ")\n";
     if (sz) {
-      std::cout << "[Step " << stepCnt << "] Current internal state          (s,x,y,speed,acc): (" << 
-        last_s_processed << ",        " << last_x_processed << ", " << last_y_processed << ", " << 
+      std::cout << "[Step " << stepCnt << "] Current internal state          (s,d,x,y,speed,acc): (" << 
+        last_s_processed << ", " << last_d_processed << ",        " << last_x_processed << ", " << last_y_processed << ", " << 
         last_speed_processed << ", " << last_acc_processed << ")\n";
     }
   }
 
   TrajData td;
-  // See if we need to adjust trajectory
-  if (sz) {
-    // Decide if this car will cause us to adjust speed
-    td = computeTargetSpeed(last_s_processed, last_speed_processed, last_acc_processed, sd);
-    trg_speed = td.final_speed;
-    if (trg_speed - prev_trg_speed_ > 0 and trg_speed - prev_trg_speed_ < 3) {
-      trg_speed = prev_trg_speed_;
+  if (policy_ == KEEP_LANE or prev_policy_ != policy_) {
+    // See if we need to adjust trajectory
+    if (sz) {
+      // Decide if this car will cause us to adjust speed
+      td = computeTargetSpeed(last_s_processed, last_d_processed, last_speed_processed, last_acc_processed, sd);
+      trg_speed = td.final_speed;
+      if (trg_speed - prev_trg_speed_ > 0 and trg_speed - prev_trg_speed_ < 3) {
+        trg_speed = prev_trg_speed_;
+      }
+    } else {
+      td = computeMatchTargetSpeed(last_s_processed, last_d_processed, last_speed_processed, last_acc_processed, 
+                                   last_d_processed, trg_speed);
     }
-  } else {
-    td = computeMatchTargetSpeed(last_s_processed, last_speed_processed, last_acc_processed, trg_speed);
   }
 
-  double cur_speed, cur_acc, prev_ns;
-  // Determine if the target speed has changed
-  if (prev_trg_speed_ != trg_speed) {
-    policy_      = MATCH_SPEED;
+  double cur_speed, cur_acc, prev_ns, prev_d;
+  static bool generate_new_trajectory = true;
+  // Determine if the target speed or policy has changed
+  if (!isZero(prev_trg_speed_ - trg_speed) or prev_policy_ != policy_) {
+    if (DEBUG and prev_policy_ != policy_) {
+      std::cout << "Changed POLICY to: " << policy_ << std::endl;
+    }
+    generate_new_trajectory = true;
     cur_speed    = last_speed_processed;
     cur_acc      = last_acc_processed;
     prev_ns      = last_s_processed;
-    //td = computeMatchTargetSpeed(last_s_processed, last_speed_processed, last_acc_processed, trg_speed);
+    prev_d       = last_d_processed;
+
+    //td.final_d = td.init_d;
+
+    // Else try to match speed in this lane
+    //if (policy_ == KEEP_SPEED) policy_ = MATCH_SPEED;
+    prev_policy_ = policy_;
     prev_trg_speed_ = trg_speed;
     computeTrajectory(td);
     if (DEBUG) {
       std::cout << "Computed new trajectory with " << forward_traj_.size() << " steps to target speed " << 
                    trg_speed << " in time " << td.time << " :\n"; 
-      std::cout << " init_s: " << td.init_s << " init_speed: " << td.init_speed << 
-                   " init_acc: " << td.init_acc << " final_s: " << td.final_s <<
+      std::cout << " init_s: " << td.init_s << " init_d: " << td.init_d << " init_speed: " << td.init_speed << 
+                   " init_acc: " << td.init_acc << " final_s: " << td.final_s << " final_d: " << td.final_d << 
                    " final_speed: " << td.final_speed << " final_acc: " << td.final_acc << std::endl;
     }
     // Clear stale trajectory data
     next_x_vals_.clear();
     next_y_vals_.clear();
     next_s_vals_.clear();
+    next_d_vals_.clear();
     prev_acc_.clear(); 
     prev_speed_.clear(); 
     sz = 0; // to make sure we flush the remaining unprocessed points
   // If target speed hasn't changed just continue with the previously computed trajectory
   } else {
+    generate_new_trajectory = false;
     cur_acc   = prev_acc_.size()?    prev_acc_.back():    0;
     cur_speed = prev_speed_.size()?  prev_speed_.back():  0;
     prev_ns   = next_s_vals_.size()? next_s_vals_.back(): st.s;
+    prev_d    = next_d_vals_.size()? next_d_vals_.back(): STARTING_LANE;
     cur_traj_idx_ += processed;
   }
 
   double prev_speed = cur_speed;
 
+  bool keep_speed = (cur_traj_idx_ >= forward_traj_.size());
+
+  updateLane(prev_d);
+  if (keep_speed) {
+    policy_ = KEEP_LANE; // we finished any possible maneuver
+    if (DEBUG) std::cout << "Finished previous policy " << prev_policy_ << " switching to KEEP_LANE\n";
+    prev_policy_ = policy_;
+  }
+
   // Build the rest of the steps
   for (int i = sz; i < TRAJ_STEPS; ++i) {
     // If we completed our computed trajectory, just change policy to keep current speed
-    if (policy_ != KEEP_SPEED and cur_traj_idx_ + i >= forward_traj_.size()) {
-      policy_ = KEEP_SPEED; 
-      if (DEBUG) std::cout << "POLICY: KEEP_SPEED  (TrajSize: " << forward_traj_.size() << ")\n";
+    if (!keep_speed and cur_traj_idx_ + i >= forward_traj_.size()) {
+      keep_speed = true;
+      if (DEBUG) std::cout << "Finished generated trajectory. Now keeping speed (TrajSize: " << forward_traj_.size() << ")\n";
     }
 
-    double nx, ny, ns;
-    if (policy_ == KEEP_SPEED) {
+    double nx, ny, ns, nd;
+    if (keep_speed) {
       ns = prev_ns + prev_speed * TIME_RES;  // TODO: perhaps use prev_speed?
       ns = fmod(ns, MAX_S);
-      auto vecXY = getXYfromSpline(ns, 6);
+      nd = prev_d;
+      auto vecXY = getXYfromSpline(ns, nd);
       nx = vecXY[0];
       ny = vecXY[1];
     } else {
       nx = forward_traj_[cur_traj_idx_ + i].x; 
       ny = forward_traj_[cur_traj_idx_ + i].y; 
       ns = forward_traj_[cur_traj_idx_ + i].s;
+      nd = forward_traj_[cur_traj_idx_ + i].d;
     }
     next_x_vals_.push_back(nx);
     next_y_vals_.push_back(ny);
     next_s_vals_.push_back(ns);
+    next_d_vals_.push_back(nd);
     // Keep track of speed and acceleration
     if (ns < prev_ns) ns += MAX_S; // Wraparound case
     cur_speed  = (ns - prev_ns) / TIME_RES;
     cur_acc    = (cur_speed - prev_speed) / TIME_RES;
     prev_ns    = fmod(ns, MAX_S);
+    prev_d     = nd;
     prev_speed = cur_speed;
     prev_acc_.push_back(cur_acc);
     prev_speed_.push_back(cur_speed);
     if (DEBUG) {
-      std::cout << "Added new trajectory step " << (i+1) << " with s: " << ns << " speed: " << cur_speed <<
-                   " acc: " << cur_acc << std::endl;
+      std::cout << "Added new trajectory step " << (i+1) << " with s: " << ns << " d: " << nd << " speed: " << cur_speed <<
+                   " acc: " << cur_acc << " keep_speed: " << keep_speed << std::endl;
     }   
   }
 
