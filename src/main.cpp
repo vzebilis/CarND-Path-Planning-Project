@@ -82,7 +82,7 @@ int main() {
           // j[1] is the data JSON object
           
           // Main car's localization Data
-          State st;
+          Context st;
           st.x = j[1]["x"];
           st.y = j[1]["y"];
           st.s = j[1]["s"];
