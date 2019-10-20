@@ -21,8 +21,8 @@ static constexpr double MAX_S           = 6945.554; // Max S (length) of our tra
 static constexpr double MAX_SPEED_MAR   = 0.99;     // MAX_SPEED margin factor 
 static constexpr double LANE_WIDTH      = 4;        // Lane width in meters
 static constexpr double FRONT_CAR_MAR   = 10;       // Safety margin from the front car (m)
-static constexpr double LANE_CHANGE_MAR = 7;        // Satefy margin for lane change
-static constexpr double LANE_CHANGE_FCT = LANE_WIDTH / 0.15; // Factor for computing the time to change lanes
+static constexpr double LANE_CHANGE_MAR = 7;        // Absolute margin for lane change
+static constexpr double LANE_CHANGE_FCT = LANE_WIDTH / 0.1; // Factor for computing the time to change lanes
 static constexpr double SENSOR_MAX_DIST = 30;       // Maxmum distance to look ahead for sensor data
 static constexpr double STARTING_LANE   = 6;        // Starting lane. 2: left, 6: middle, 10: right
 
@@ -58,10 +58,12 @@ typedef struct {
 } PositionData;
 
 typedef struct {
-  tk::spline sx;
-  tk::spline sy;
-  tk::spline sdx;
-  tk::spline sdy;
+  tk::spline x;
+  tk::spline y;
+  tk::spline dx;
+  tk::spline dy;
+  tk::spline s;
+  tk::spline d;
 } SplineData;
 
 typedef struct {
@@ -69,6 +71,8 @@ typedef struct {
   double init_d;
   double init_speed;
   double init_acc;
+  double mid_s;
+  double mid_d;
   double final_s;
   double final_d;
   double final_speed;
@@ -116,8 +120,8 @@ public:
     virtual void update() = 0;
     virtual Policy nextPolicy() = 0;
     virtual TrajData computeTargetPos(PositionData & p, SensorData * sd) { return {}; }
+    virtual void computeTrajectory(TrajData & td);
     // NON-VIRTUAL
-    void computeTrajectory(TrajData & td);
     double getTargetSpeed() const { return trg_speed_; }
 };
 
@@ -134,6 +138,7 @@ public:
     void update() override;
     Policy nextPolicy() override;
     TrajData computeTargetPos(PositionData & p, SensorData * sd) override;
+    void computeTrajectory(TrajData & td) override;
 };
 
 class MatchSpeed : public State {
@@ -166,9 +171,11 @@ public:
   double                delta_speed_to_zero_acc_;
 
   void generateFullSplines();
+  SplineData * getShortSplines(TrajData & td);
   std::vector<double> getXYfromSpline(double s, double d_offset);
   TrajData computeMatchTargetSpeed(double init_s, double init_d, double init_speed, double init_acc,
                                    double final_d, double trg_speed);
+  bool canChangeLane(const PositionData & p, SensorData & ahead, SensorData & behind);
   SensorData checkLanes(const PositionData & p);
   void updateLane(double d);
   void handleFirstTime();

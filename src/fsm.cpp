@@ -63,17 +63,18 @@ vector<double> FSM::getXYfromSpline(double s, double d_offset)
 
   int wp2 = (prev_wp+1)%map_.x.size();
 
-  double prev_x = spd_.sx(map_.s[prev_wp]);
-  double prev_y = spd_.sy(map_.s[prev_wp]);
-  double x2 = spd_.sx(map_.s[wp2]);
-  double y2 = spd_.sy(map_.s[wp2]);
+  double prev_x = spd_.x(map_.s[prev_wp]);
+  double prev_y = spd_.y(map_.s[prev_wp]);
+  double x2 = spd_.x(map_.s[wp2]);
+  double y2 = spd_.y(map_.s[wp2]);
   double heading = atan2(y2 - prev_y, x2 - prev_x);
 
-  double seg_x  = spd_.sx(s);
-  double seg_y  = spd_.sy(s);
-  double seg_dx = spd_.sdx(s);
-  double seg_dy = spd_.sdy(s);
-  double d = sqrt(pow(seg_dx, 2) + pow(seg_dy, 2)) * d_offset; // Chosen lane
+  double seg_x  = spd_.x(s);
+  double seg_y  = spd_.y(s);
+  //double seg_dx = spd_.sdx(s);
+  //double seg_dy = spd_.sdy(s);
+  //double d = sqrt(pow(seg_dx, 2) + pow(seg_dy, 2)) * d_offset; // Chosen lane
+  double d = d_offset; // Chosen lane
 
   double perp_heading = heading-pi()/2;
 
@@ -109,10 +110,10 @@ FSM::FSM(const Map & map) :
 // Will be used to compute trajectories
 void FSM::generateFullSplines()
 {
-  spd_.sx.set_points(map_.s, map_.x);
-  spd_.sy.set_points(map_.s, map_.y);
-  spd_.sdx.set_points(map_.s, map_.dx);
-  spd_.sdy.set_points(map_.s, map_.dy);
+  spd_.x.set_points(map_.s, map_.x);
+  spd_.y.set_points(map_.s, map_.y);
+  spd_.dx.set_points(map_.s, map_.dx);
+  spd_.dy.set_points(map_.s, map_.dy);
 }
 
 // Method to compute and return the minimum amount of road length and time
@@ -179,11 +180,116 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_d, double init_
   ret.final_s     = S;
   ret.final_speed = trg_speed;
   ret.final_acc   = 0;
-  ret.time        = T;
+  ret.time        = T * 1.1; // Add 10% margin
 
   return ret;
 }
 
+SplineData * FSM::getShortSplines(TrajData & td)
+{
+  SplineData * spd =  new SplineData;
+  int msz = map_.s.size();
+  assert(td.time > 0);
+  assert(map_.s.size() > 0);
+
+  // Get next WP from final position
+  int next_wp = msz;
+  while (td.final_s < map_.s[next_wp-1] and (next_wp > 0)) --next_wp;
+  int prev_wp = -1;
+  while (td.init_s > map_.s[prev_wp+1] and (prev_wp < msz-1)) ++prev_wp;
+  // Sanity checks
+  assert(prev_wp > 0);
+  assert(next_wp < msz);
+
+  auto next_s     = map_.s[next_wp];
+  double next_t   = next_s - fmod(td.final_s, MAX_S);
+  if (next_t < 0) next_t += MAX_S;
+  next_t /= td.final_speed? td.final_speed: 0.01;
+  next_t += td.time;
+
+//  auto nnext_wp = next_wp +1;
+//  nnext_wp = nnext_wp % msz;
+//  auto nnext_s    = map_.s[nnext_wp];
+//  double nnext_t  = nnext_s - next_s;
+//  if (nnext_t < 0) nnext_t += MAX_S;
+//  nnext_t /= td.final_speed? td.final_speed: 0.01;
+//  nnext_t += next_t;
+  // Use beginning of current trajectory data as previous waypoint
+//  auto prev_s     = next_s_vals_.front();
+//  double prev_t   = fmod(td.init_s, MAX_S) - fmod(prev_s, MAX_S);
+//  if (prev_t < 0) prev_t += MAX_S;
+//  prev_t /= td.init_speed? td.init_speed: 0.01;
+
+  auto prev_s     = map_.s[prev_wp];
+  double prev_t   = fmod(td.init_s, MAX_S) - prev_s;
+  if (prev_t < 0) prev_t += MAX_S;
+  prev_t /= td.init_speed? td.init_speed: 0.01;
+
+//  auto pprev_wp = prev_wp -1;
+//  pprev_wp = pprev_wp % msz;
+//  auto pprev_s     = map_.s[pprev_wp];
+//  double pprev_t   = prev_s - pprev_s;
+//  if (pprev_t < 0) pprev_t += MAX_S;
+//  pprev_t /= td.init_speed? td.init_speed: 0.01;
+//  pprev_t += prev_t;
+
+  if (DEBUG) std::cout << "GetShortSplines. time: " << td.time << " init_s: " << td.init_s << " final_s: " <<
+      td.final_s << " next_s: " << next_s << " next_t: " << next_t << " prev_s: " << prev_s << " prev_t: " <<
+      -prev_t << std::endl;
+
+  auto prev_xy  = getXY(prev_s, td.init_d, map_.s, map_.x, map_.y);
+  auto init_xy  = getXY(td.init_s, td.init_d, map_.s, map_.x, map_.y);
+  auto final_xy = getXY(td.final_s, td.final_d, map_.s, map_.x, map_.y);
+  auto next_xy  = getXY(next_s, td.final_d, map_.s, map_.x, map_.y);
+
+  vector<double> times = {-prev_t, 0, td.time, next_t};
+  spd->x.set_points(times, {prev_xy[0], init_xy[0], final_xy[0], next_xy[0]});
+  spd->y.set_points(times, {prev_xy[1], init_xy[1], final_xy[1], next_xy[1]});
+  spd->s.set_points(times, {prev_s, td.init_s, td.final_s, next_s});
+  spd->d.set_points(times, {td.init_d, td.init_d, td.final_d, td.final_d});
+
+  if (false and DEBUG) {
+    std::cout << "GetShortSplines. Going through all the steps in the spline s:" <<std::endl;
+    double time = TIME_RES;
+    while (time <= td.time) {
+      std::cout << "Time: " << time << " S: " << spd->s(time) << std::endl;
+      time += TIME_RES;
+    }
+  }
+  return spd;
+}
+
+//
+//
+//
+void ChangeLane::computeTrajectory(TrajData & td)
+{
+  forward_traj_.clear();
+  for (size_t i = 0; i < fsm_.next_x_vals_.size(); ++i) forward_traj_.emplace_back();
+  cur_traj_idx_  = 0;
+
+  auto spd = fsm_.getShortSplines(td);
+
+  // Generate trajectory until we reach the required time
+  double time    = TIME_RES;
+  while (time <= td.time) {
+    forward_traj_.emplace_back();
+    auto & ft    = forward_traj_.back();
+    ft.x         = spd->x(time);
+    ft.y         = spd->y(time);
+    ft.s         = spd->s(time);
+    ft.d         = spd->d(time);
+    time        += TIME_RES;
+  }
+  delete spd;
+  if (DEBUG) {
+    std::cout << "Computed new trajectory with " << forward_traj_.size() << " steps to target speed " <<
+            trg_speed_ << " in time " << td.time << " :\n";
+    std::cout << " init_s: " << td.init_s << " init_d: " << td.init_d << " init_speed: " << td.init_speed <<
+            " init_acc: " << td.init_acc << " final_s: " << td.final_s << " final_d: " << td.final_d <<
+            " final_speed: " << td.final_speed << " final_acc: " << td.final_acc << std::endl;
+  }
+}
 
 //
 // Generic state method to compute the necessary trajectory based on
@@ -192,8 +298,11 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_d, double init_
 void State::computeTrajectory(TrajData & td)
 {
   assert(td.time);
-  forward_traj_.clear();
-  cur_traj_idx_  = 0;
+  size_t sz = cur_traj_idx_ + fsm_.cxt_->path_x.size();
+  if (sz > forward_traj_.size()) forward_traj_.clear();
+  else forward_traj_.erase(forward_traj_.begin() + sz, forward_traj_.end());
+  //forward_traj_.clear();
+  //cur_traj_idx_  = 0;
   auto coeffs    = computePolyCoefficients(td);
   // Generate trajectory until we reach the required time
   double time    = TIME_RES;
@@ -217,7 +326,7 @@ void State::computeTrajectory(TrajData & td)
   }
 
   if (DEBUG) {
-    std::cout << "Computed new trajectory with " << forward_traj_.size() << " steps to target speed " <<
+    std::cout << "State. Computed new trajectory with " << forward_traj_.size() << " steps to target speed " <<
                  trg_speed_ << " in time " << td.time << " :\n";
     std::cout << " init_s: " << td.init_s << " init_d: " << td.init_d << " init_speed: " << td.init_speed <<
                  " init_acc: " << td.init_acc << " final_s: " << td.final_s << " final_d: " << td.final_d <<
@@ -225,12 +334,18 @@ void State::computeTrajectory(TrajData & td)
   }
 }
 
+
 //
 // Function to return the closest car ahead or behind, in the lane defined by d_offset
 //
 static SensorData getSensorFusion(const PositionData & p, Context & cxt, bool ahead, double d_offset)
 {
   static constexpr double HALF_LANE_WIDTH = LANE_WIDTH / 2;
+
+  // If we are looking at the side lanes, look a bit further ahead (not behind!)
+  double factor = 1.0;
+  if (d_offset > HALF_LANE_WIDTH or d_offset < -HALF_LANE_WIDTH) factor = 1.5;
+
   // Get data for car closest to us in s, going forward
   int min_idx  = -1;
   double min_diff_s = MAX_S;
@@ -252,7 +367,9 @@ static SensorData getSensorFusion(const PositionData & p, Context & cxt, bool ah
     
     // Only interested about cars in a reasonable distance
     double diff_s = fabs(cur_s - st_s);
-    if (diff_s > SENSOR_MAX_DIST) continue;
+    double margin = SENSOR_MAX_DIST;
+    if (cur_s - st_s > 0) margin *= factor;
+    if (diff_s > margin) continue;
 
     if (diff_s < min_diff_s) {
       min_diff_s  = diff_s;
@@ -292,15 +409,24 @@ static std::pair<double, double> getTimeToIntercept(double dist, double speed, d
 }
 
 // Function that decides whether we can change lane, based on cars ahead and behind
-static bool canChangeLane(const PositionData & p, SensorData & ahead, SensorData & behind)
+bool FSM::canChangeLane(const PositionData & p, SensorData & ahead, SensorData & behind)
 {
+  double time_steps_before_change = cxt_->path_x.size() * TIME_RES;
   double time_to_change = LANE_CHANGE_FCT / p.v; // time to change lane with current speed
   // First check the car behind
-  if (behind.diff_s < LANE_CHANGE_MAR) return false;
-  if (behind.diff_s < (behind.v - p.v) * time_to_change) return false;
+  {
+    if (behind.diff_s < LANE_CHANGE_MAR) return false;
+    double dv = behind.v - p.v;
+    double future_diff_s = behind.diff_s - LANE_CHANGE_MAR - time_steps_before_change * dv;
+    if (future_diff_s < dv * time_to_change) return false;
+  }
   // Now check the car ahead
-  if (ahead.diff_s < FRONT_CAR_MAR) return false;
-  if (ahead.diff_s < (p.v - ahead.v) * time_to_change) return false;
+  {
+    if (ahead.diff_s < LANE_CHANGE_MAR) return false;
+    double dv = p.v - ahead.v;
+    double future_diff_s = ahead.diff_s - LANE_CHANGE_MAR - time_steps_before_change * dv;
+    if (future_diff_s < dv * time_to_change) return false;
+  }
   return true;
 }
 //
@@ -330,7 +456,7 @@ SensorData FSM::checkLanes(const PositionData & p)
     // Check if there is enough space
     if (canChangeLane(p, right_ahead, right_backw)) {
       // If there are no cars present ahead right or if their speed is higher than the best, chose right
-      if (right_ahead.s == -1 or best.v < 0.9 * right_ahead.v) {
+      if (right_ahead.s == -1 or best.v < 0.95 * right_ahead.v) {
         best = right_ahead;
         best.pol = CHANGE_LANE;
         best.d = (lane_ == LEFT)? 6: 10;
@@ -352,7 +478,7 @@ SensorData FSM::checkLanes(const PositionData & p)
     // Check if there is enough space
     if (canChangeLane(p, left_ahead, left_backw)) {
       // If there are no cars present ahead left or if their speed is higher than the best, chose left
-      if (left_ahead.s == -1 or best.v < 0.9 * left_ahead.v) {
+      if (left_ahead.s == -1 or best.v < 0.95 * left_ahead.v) {
         best = left_ahead;
         best.pol = CHANGE_LANE;
         best.d = (lane_ == RIGHT)? 6: 2;
@@ -388,9 +514,10 @@ void FSM::updateLane(double d)
 ChangeLane::ChangeLane(FSM & fsm, double trg_speed, SensorData * sd) : State(fsm, trg_speed)
 {
   if (DEBUG) std::cout << "ChangeLane: creating new State\n";
-  p_ = fsm_.getLastProcessed();
-  fsm_.clearAll();
-  //p_ = fsm_.getMostRecentNotProcessed();
+  //p_ = fsm_.getLastProcessed();
+  //fsm_.clearAll();
+  p_ = fsm_.getMostRecentNotProcessed();
+  fsm_.clearProcessed();
   TrajData td = computeTargetPos(p_, sd);
   fsm_.prev_trg_speed_ = trg_speed_;
   computeTrajectory(td); // Base class method
@@ -411,10 +538,14 @@ TrajData ChangeLane::computeTargetPos(PositionData & p, SensorData * sd)
 
   // If changing lanes complete lane change fast
   td.time        = LANE_CHANGE_FCT / p.v; // time to switch lanes
-  td.final_s     = p.s + p.v * td.time; // distance travelled
+  td.final_s     = p.s + p.v * td.time * 1.1; // distance travelled
   td.final_d     = sd->d;
   td.final_speed = p.v;
   td.final_acc   = 0;
+
+  td.mid_s       = (td.init_s + td.final_s) / 2;
+  td.mid_d       = (td.init_d + td.final_d) / 2;
+
   if (DEBUG) std::cout << "Changing lanes from d: " << td.init_d << " to d: " << td.final_d << " in time: " << td.time <<
           " and s: " << (p.v * td.time) << std::endl;
   return td;
@@ -524,6 +655,10 @@ TrajData MatchSpeed::computeTargetPos(PositionData & p, SensorData * sd)
     td.time += (car_future_s - td.final_s) / p.v;
     td.final_s = car_future_s;
   }
+
+  // TODO: we should use the middle time step value of s
+  td.mid_s = (td.init_s + td.final_s) / 2;
+  td.mid_d = p.d;
   //auto time_trav = getTimeToIntercept(car_s - init_s, init_speed, trg_speed);
   //if (DEBUG) std::cout << "Time to intercept car: " << time_trav.first << " and s: " << time_trav.second << std::endl;
   //td.final_s     = init_s + time_trav.second;
@@ -565,6 +700,19 @@ static void printPositionData(std::string prefix, PositionData & p)
   std::cout << prefix.c_str() << " s: " << p.s << " d: " << p.d << " v: " << p.v << " a: " << p.a << std::endl;
 }
 
+static TrajData initTrajData(size_t sz, double init_s, double init_speed, double init_d)
+{
+  TrajData td;
+  td.time = (TRAJ_STEPS - sz) * TIME_RES;
+  td.init_s = td.final_s = init_s;
+  td.final_s += td.init_speed * td.time;
+  td.init_speed = td.final_speed = init_speed;
+  td.init_acc = td.final_acc = 0;
+  td.init_d = td.final_d = td.mid_d = init_d;
+  td.mid_s = (td.init_s + td.final_s) / 2;
+  return td;
+}
+
 //
 // Method to apply the pre-computed trajectory
 //
@@ -579,20 +727,36 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
 
   updateLane(prev_d);
 
+  SplineData * spd = nullptr;
   bool keep_speed = (cur_traj_idx >= forward_traj.size());
+
+  size_t i = next_x_vals_.size();
+
+//  if (keep_speed) {
+//    TrajData td = initTrajData(i, prev_ns, prev_speed, prev_d);
+//    spd = getShortSplines(td);
+//  }
 
   if (DEBUG) printPositionData("ApplyTrajectory", p);
 
+  double time = 0;
   // Build the rest of the steps
-  for (size_t i = next_x_vals_.size(); i < TRAJ_STEPS; ++i) {
+  for (; i < TRAJ_STEPS; ++i) {
     // If we completed our computed trajectory, just change policy to keep current speed
     if (!keep_speed and cur_traj_idx + i >= forward_traj.size()) {
+      //TrajData td = initTrajData(i, prev_ns, prev_speed, prev_d);
+      //spd = getShortSplines(td);
       keep_speed = true;
+      time = 0;
       if (DEBUG) std::cout << "Finished generated trajectory. Now keeping speed (TrajSize: " << forward_traj.size() << ")\n";
     }
-
+    time += TIME_RES;
     double nx, ny, ns, nd;
     if (keep_speed) {
+//      nx = spd->x(time);
+//      ny = spd->y(time);
+//      ns = spd->s(time);
+//      nd = prev_d;
       ns = prev_ns + prev_speed * TIME_RES;  // TODO: perhaps use prev_speed?
       ns = fmod(ns, MAX_S);
       nd = prev_d;
@@ -605,6 +769,10 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
       ns = forward_traj[cur_traj_idx + i].s;
       nd = forward_traj[cur_traj_idx + i].d;
     }
+    if (DEBUG) {
+      std::cout << "Added new trajectory step " << (i+1) << " with s: " << ns << " d: " << nd << " speed: " << cur_speed <<
+          " acc: " << cur_acc << " keep_speed: " << keep_speed << std::endl;
+    }
     next_x_vals_.push_back(nx);
     next_y_vals_.push_back(ny);
     next_s_vals_.push_back(ns);
@@ -612,17 +780,16 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
     // Keep track of speed and acceleration
     if (ns < prev_ns) ns += MAX_S; // Wraparound case
     cur_speed  = (ns - prev_ns) / TIME_RES;
+    cur_speed  = fmin(cur_speed, MAX_SPEED * MAX_SPEED_MAR);
     cur_acc    = (cur_speed - prev_speed) / TIME_RES;
+    cur_acc    = fmin(cur_acc, MAX_ACC);
     prev_ns    = fmod(ns, MAX_S);
     prev_d     = nd;
     prev_speed = cur_speed;
     prev_acc_.push_back(cur_acc);
     prev_speed_.push_back(cur_speed);
-    if (DEBUG) {
-      std::cout << "Added new trajectory step " << (i+1) << " with s: " << ns << " d: " << nd << " speed: " << cur_speed <<
-                   " acc: " << cur_acc << " keep_speed: " << keep_speed << std::endl;
-    }
   }
+  if (spd) delete spd;
 }
 
 //
@@ -720,16 +887,18 @@ void FSM::update(Context & cxt)
 
   if (DEBUG) {
     static int stepCnt = 0;
+    std::cout << "================================================================================\n";
     std::cout << "[Step " << stepCnt << "] Current internal state  (s,d,x,y,v,a): (" <<
         p.s << ", " << p.d << ", " << p.x << ", " << p.y << ", " << p.v << ", " << p.a << ")\n";
     std::cout << "State target speed: : " << state_->getTargetSpeed() << std::endl;
     stepCnt += (TRAJ_STEPS - sz);
+    std::cout << "FSM update. Server processed " << (TRAJ_STEPS - sz) << " points" << std::endl;
   }
 
   Policy pol = state_->nextPolicy();
 
   // Are we already in the process of a maneuver? Then go straight to update
-  if (pol == KEEP_LANE) {
+  if (pol != CHANGE_LANE) {
     // Check sensor fusion to see if we need to change lane
     SensorData sd = checkLanes(p);
     // Check if our policy is changed and we need to change lane
@@ -740,7 +909,7 @@ void FSM::update(Context & cxt)
       prev_pol_ = pol;
       return;
     // Otherwise, check if our speed target has changed
-    } else if (!isZero(sd.v - state_->getTargetSpeed())) {
+    } else if (state_->getTargetSpeed() - sd.v > 0 or state_->getTargetSpeed() - sd.v < -0.1) {
       pol = MATCH_SPEED;
       delete state_;
       state_ = new MatchSpeed(*this, sd.v, &sd);
