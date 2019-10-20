@@ -132,8 +132,9 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_d, double init_
   ret.init_d              = init_d;     
   ret.final_d             = final_d;     
 
+  double delta_v = trg_speed - init_speed;
   // If we are already at the target speed, with zero acceleration, then nothing to do
-  if (isZero(trg_speed - init_speed) and isZero(init_acc)) return ret;
+  if (delta_v > 0 and delta_v < 0.1 and isZero(init_acc)) return ret;
 
 
   // How many timesteps do we need at least to shed our initial acceleration?
@@ -146,10 +147,10 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_d, double init_
     a_shed               += a_jerk * TIME_RES;
     delta_speed_shed     += a_shed * TIME_RES;
   }
-  const bool accel = trg_speed - init_speed + delta_speed_shed >= 0;
+  const bool accel = delta_v + delta_speed_shed >= 0;
 
   // The flip point: speed at which to switch from accelerating to decelerating or vice versa
-  double flip_point = init_speed + (trg_speed - init_speed + delta_speed_shed) / 2;
+  double flip_point = init_speed + (delta_v + delta_speed_shed) / 2;
   double T = 0;
   double S = init_s;
   double cur_speed = init_speed;
@@ -898,7 +899,7 @@ void FSM::update(Context & cxt)
   Policy pol = state_->nextPolicy();
 
   // Are we already in the process of a maneuver? Then go straight to update
-  if (pol != CHANGE_LANE) {
+  if (pol == KEEP_LANE) {
     // Check sensor fusion to see if we need to change lane
     SensorData sd = checkLanes(p);
     // Check if our policy is changed and we need to change lane
