@@ -71,8 +71,6 @@ typedef struct {
   double init_d;
   double init_speed;
   double init_acc;
-  double mid_s;
-  double mid_d;
   double final_s;
   double final_d;
   double final_speed;
@@ -122,6 +120,7 @@ public:
     virtual TrajData computeTargetPos(PositionData & p, SensorData * sd) { return {}; }
     virtual void computeTrajectory(TrajData & td);
     // NON-VIRTUAL
+    void computeXYTrajectory(TrajData & td);
     double getTargetSpeed() const { return trg_speed_; }
 };
 

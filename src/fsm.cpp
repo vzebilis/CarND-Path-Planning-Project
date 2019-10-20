@@ -117,7 +117,7 @@ void FSM::generateFullSplines()
 }
 
 // Method to compute and return the minimum amount of road length and time
-// it would take to acceleratate to target speed with 0 final acceleration
+// it would take to match target speed with 0 final acceleration
 TrajData FSM::computeMatchTargetSpeed(double init_s, double init_d, double init_speed, double init_acc, 
                                       double final_d, double trg_speed) 
 {
@@ -167,7 +167,7 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_d, double init_
     double jerk  = (accel)? MAX_JERK: -MAX_JERK;
     jerk         = (flipped)? -jerk: jerk;
     cur_acc     += jerk * TIME_RES;
-    if (fabs(cur_acc) > MAX_ACC) {
+    if (fabs(cur_acc) >= MAX_ACC) {
       cur_acc = (cur_acc > 0)? MAX_ACC: -MAX_ACC;
       // Update flip point as well
       flip_point = trg_speed + ((cur_acc > 0)? -1: 1) * delta_speed_to_zero_acc_;
@@ -181,7 +181,7 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_d, double init_
   ret.final_s     = S;
   ret.final_speed = trg_speed;
   ret.final_acc   = 0;
-  ret.time        = T * 1.1; // Add 10% margin
+  ret.time        = T * 1.1; // Add 10% margin to smooth transition a bit more
 
   return ret;
 }
@@ -292,6 +292,87 @@ void ChangeLane::computeTrajectory(TrajData & td)
   }
 }
 
+//
+// Generic state method to compute the necessary trajectory based on
+// the supplied TrajData info
+//
+void State::computeXYTrajectory(TrajData & td)
+{
+  assert(td.time);
+  Context & cxt = *fsm_.cxt_;
+  size_t sz = cxt.path_x.size();
+  if (sz +  cur_traj_idx_ > forward_traj_.size()) forward_traj_.clear();
+  else forward_traj_.erase(forward_traj_.begin() + sz +  cur_traj_idx_, forward_traj_.end());
+
+  // Here we need to start with two simple points close to our reference location
+  vector<double> xs, ys;
+  double ref_yaw = cxt.yaw;
+  double ref_x   = cxt.x;
+  double ref_y   = cxt.y;
+  double ref_v   = td.final_speed;
+  if (!sz) {
+    double prev_x = ref_x - cos(cxt.yaw);
+    double prev_y = ref_y - sin(cxt.yaw);
+    xs.push_back(prev_x); ys.push_back(prev_y);
+  } else {
+    ref_x = cxt.path_x[sz-1];
+    ref_y = cxt.path_y[sz-1];
+    double ref_x_prev = cxt.path_x[sz-2];
+    double ref_y_prev = cxt.path_y[sz-2];
+    ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+    xs.push_back(ref_x_prev); ys.push_back(ref_y_prev);
+  }
+  xs.push_back(ref_x); ys.push_back(ref_y);
+
+  // Now we will add some more points further away
+  auto next_wp0 = getXY(cxt.s + 30, td.final_d, fsm_.map_.s, fsm_.map_.x, fsm_.map_.y);
+  auto next_wp1 = getXY(cxt.s + 60, td.final_d, fsm_.map_.s, fsm_.map_.x, fsm_.map_.y);
+  auto next_wp2 = getXY(cxt.s + 90, td.final_d, fsm_.map_.s, fsm_.map_.x, fsm_.map_.y);
+  xs.push_back(next_wp0[0]); ys.push_back(next_wp0[1]);
+  xs.push_back(next_wp1[0]); ys.push_back(next_wp1[1]);
+  xs.push_back(next_wp2[0]); ys.push_back(next_wp2[1]);
+
+  // Now we need to transform these points to the car-local coordinates:
+  // The reference point is at (0,0) and the x axis points to our yaw angle.
+  // This way we can use the spline as f(x), and it would still behave as a function (single value of y for x)
+  for (int i = 0; i < xs.size(); ++i) {
+    double shift_x = xs[i] - ref_x;
+    double shift_y = ys[i] - ref_y;
+    xs[i] = (shift_x * cos(-ref_yaw) - shift_y * sin(-ref_yaw));
+    ys[i] = (shift_x * sin(-ref_yaw) + shift_y * cos(-ref_yaw));
+  }
+
+  tk::spline spl;
+  spl.set_points(xs, ys);
+
+  // How many point do I need to sample from the spline so that we still keep under our
+  // velocity and acceleration constraints?
+  //auto trg_xy = getXY(td.final_s, td.final_d, fsm_.map_.s, fsm_.map_.x, fsm_.map_.y);
+  double trg_x = 30;
+  double trg_y = spl(trg_x);
+  double trg_dist = sqrt(pow(trg_x, 2) + pow(trg_y, 2));
+  double x_add_on = 0;
+  for (int i = sz; i < TRAJ_STEPS; ++i) {
+    double N = trg_dist / (TIME_RES * ref_v);
+    double x_point = x_add_on + trg_x / N;
+    double y_point = spl(x_point);
+
+    x_add_on = x_point;
+    double x_ref = x_point;
+    double y_ref = y_point;
+    // Re-translate to original world coordinates
+    x_point = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
+    y_point = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
+
+    x_point += ref_x;
+    y_point += ref_y;
+
+    fsm_.next_x_vals_.push_back(x_point);
+    fsm_.next_y_vals_.push_back(y_point);
+  }
+
+  return;
+}
 //
 // Generic state method to compute the necessary trajectory based on
 // the supplied TrajData info
@@ -544,9 +625,6 @@ TrajData ChangeLane::computeTargetPos(PositionData & p, SensorData * sd)
   td.final_speed = p.v;
   td.final_acc   = 0;
 
-  td.mid_s       = (td.init_s + td.final_s) / 2;
-  td.mid_d       = (td.init_d + td.final_d) / 2;
-
   if (DEBUG) std::cout << "Changing lanes from d: " << td.init_d << " to d: " << td.final_d << " in time: " << td.time <<
           " and s: " << (p.v * td.time) << std::endl;
   return td;
@@ -619,12 +697,60 @@ void MatchSpeed::update()
   fsm_.applyTrajectory(p_, forward_traj_, cur_traj_idx_);
 }
 
+static TrajData destTrajData(PositionData & p, SensorData * sd)
+{
+  TrajData td;
+  td.time = 3.5;
+
+  td.init_s = p.s;
+  td.final_s = p.s + 30;
+
+  td.init_d = p.d;
+  td.final_d = p.d;
+
+  td.init_speed = p.v;
+  td.final_speed = MAX_SPEED * MAX_SPEED_MAR;
+
+  td.init_acc = p.a;
+  td.final_acc = 0;
+
+  if (!sd or sd->s == -1) {
+    if (DEBUG) std::cout << "Setting target speed to MAX\n";
+    return td;
+  }
+
+  double trg_speed = sd->v;
+  trg_speed        = fmin(trg_speed, MAX_SPEED * MAX_SPEED_MAR);
+  td.final_speed   = trg_speed;
+
+  // Don't waste time
+  if (trg_speed >= p.v) {
+    if (DEBUG) std::cout << "Setting target speed to " << trg_speed << std::endl;
+    return td;
+  }
+
+  // Otherwise, decelerate more smoothly if we have enough space/time to do it
+  // In order to so so, we calculate the future position of the observed car
+  // in the time it will take us to match the target speed.
+  // This give us an extra margin to decelerate more smoothly
+  double car_s = sd->s;
+  if (car_s < td.init_s) car_s += MAX_S;
+  if (car_s - FRONT_CAR_MAR > td.init_s) car_s -= FRONT_CAR_MAR;
+  auto time_trav = getTimeToIntercept(car_s - td.init_s, td.init_speed, trg_speed);
+  if (DEBUG) std::cout << "Time to intercept car: " << time_trav.first << " and s: " << time_trav.second << std::endl;
+  td.final_s     = td.init_s + time_trav.second;
+  td.final_speed = trg_speed;
+  td.time        = time_trav.first;
+
+  return td;
+}
 
 //
 // Compute target position, for matching observed speed
 //
 TrajData MatchSpeed::computeTargetPos(PositionData & p, SensorData * sd)
 {
+  //return destTrajData(p, sd);
   // If no car spotted, go to max speed
   if (!sd or sd->s == -1) {
     if (DEBUG) std::cout << "Setting target speed to MAX\n";
@@ -657,14 +783,6 @@ TrajData MatchSpeed::computeTargetPos(PositionData & p, SensorData * sd)
     td.final_s = car_future_s;
   }
 
-  // TODO: we should use the middle time step value of s
-  td.mid_s = (td.init_s + td.final_s) / 2;
-  td.mid_d = p.d;
-  //auto time_trav = getTimeToIntercept(car_s - init_s, init_speed, trg_speed);
-  //if (DEBUG) std::cout << "Time to intercept car: " << time_trav.first << " and s: " << time_trav.second << std::endl;
-  //td.final_s     = init_s + time_trav.second;
-  //td.final_speed = trg_speed;
-  //td.time        = time_trav.first;
   return td;
 }
 
@@ -709,8 +827,7 @@ static TrajData initTrajData(size_t sz, double init_s, double init_speed, double
   td.final_s += td.init_speed * td.time;
   td.init_speed = td.final_speed = init_speed;
   td.init_acc = td.final_acc = 0;
-  td.init_d = td.final_d = td.mid_d = init_d;
-  td.mid_s = (td.init_s + td.final_s) / 2;
+  td.init_d = td.final_d = init_d;
   return td;
 }
 
