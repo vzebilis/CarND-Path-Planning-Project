@@ -16,9 +16,9 @@ static constexpr double TIME_RES        = 0.02;     // Time resolution in sec
 static constexpr int    TRAJ_STEPS      = 50;       // trajectory steps
 static constexpr double MAX_SPEED       = 50 * MPH2MPS; // specified in MPH, converted to m/sec
 static constexpr double MAX_ACC         = 10;       // in m/sec^2 
-static constexpr double MAX_JERK        = 10;       // Max jerk in m/sec^3  
+static constexpr double MAX_JERK        = 10;       // Max jerk in m/sec^3
 static constexpr double MAX_S           = 6945.554; // Max S (length) of our track
-static constexpr double MAX_SPEED_MAR   = 0.99;     // MAX_SPEED margin factor 
+static constexpr double MAX_SPEED_MAR   = 0.90;     // MAX_SPEED margin factor
 static constexpr double LANE_WIDTH      = 4;        // Lane width in meters
 static constexpr double FRONT_CAR_MAR   = 10;       // Safety margin from the front car (m)
 static constexpr double LANE_CHANGE_MAR = 7;        // Absolute margin for lane change
@@ -56,6 +56,16 @@ typedef struct {
   double v;
   double a;
 } PositionData;
+
+typedef struct {
+  double yaw;
+  double x;
+  double y;
+  double vx;
+  double vy;
+  double ax;
+  double ay;
+} Movement;
 
 typedef struct {
   tk::spline x;
@@ -170,6 +180,7 @@ public:
   double                delta_speed_to_zero_acc_;
 
   void generateFullSplines();
+  void createXYFromSpline(double trg_v, double d, Movement & m, Movement & prev_m);
   SplineData * getShortSplines(TrajData & td);
   std::vector<double> getXYfromSpline(double s, double d_offset);
   TrajData computeMatchTargetSpeed(double init_s, double init_d, double init_speed, double init_acc,
@@ -188,6 +199,7 @@ public:
       next_x_vals_.clear(); next_y_vals_.clear();
       next_s_vals_.clear(); next_d_vals_.clear();
   }
+  Movement getLastPlannedMovement();
   PositionData getLastProcessed() const;
   PositionData getMostRecentNotProcessed() const;
   void incrementByProcessed(size_t & val) const;

@@ -181,7 +181,7 @@ TrajData FSM::computeMatchTargetSpeed(double init_s, double init_d, double init_
   ret.final_s     = S;
   ret.final_speed = trg_speed;
   ret.final_acc   = 0;
-  ret.time        = T * 1.1; // Add 10% margin to smooth transition a bit more
+  ret.time        = T;
 
   return ret;
 }
@@ -263,6 +263,7 @@ SplineData * FSM::getShortSplines(TrajData & td)
 //
 //
 //
+
 void ChangeLane::computeTrajectory(TrajData & td)
 {
   forward_traj_.clear();
@@ -302,17 +303,21 @@ void State::computeXYTrajectory(TrajData & td)
   Context & cxt = *fsm_.cxt_;
   size_t sz = cxt.path_x.size();
   if (sz +  cur_traj_idx_ > forward_traj_.size()) forward_traj_.clear();
-  else forward_traj_.erase(forward_traj_.begin() + sz +  cur_traj_idx_, forward_traj_.end());
+  else forward_traj_.erase(forward_traj_.begin(), forward_traj_.begin() + sz + cur_traj_idx_);
+
+  size_t time_steps = ceil(td.time / TIME_RES);
 
   // Here we need to start with two simple points close to our reference location
   vector<double> xs, ys;
-  double ref_yaw = cxt.yaw;
+  double ref_yaw = deg2rad(cxt.yaw);
   double ref_x   = cxt.x;
   double ref_y   = cxt.y;
-  double ref_v   = td.final_speed;
-  if (!sz) {
-    double prev_x = ref_x - cos(cxt.yaw);
-    double prev_y = ref_y - sin(cxt.yaw);
+  double ref_v   = td.init_speed;
+  double trg_v   = td.final_speed;
+  bool accel     = trg_v > ref_v;
+  if (sz < 2) {
+    double prev_x = ref_x - cos(ref_yaw);
+    double prev_y = ref_y - sin(ref_yaw);
     xs.push_back(prev_x); ys.push_back(prev_y);
   } else {
     ref_x = cxt.path_x[sz-1];
@@ -347,16 +352,18 @@ void State::computeXYTrajectory(TrajData & td)
 
   // How many point do I need to sample from the spline so that we still keep under our
   // velocity and acceleration constraints?
-  //auto trg_xy = getXY(td.final_s, td.final_d, fsm_.map_.s, fsm_.map_.x, fsm_.map_.y);
-  double trg_x = 30;
+  auto trg_xy = getXY(td.final_s, td.final_d, fsm_.map_.s, fsm_.map_.x, fsm_.map_.y);
+  double trg_x = trg_xy[0];
   double trg_y = spl(trg_x);
   double trg_dist = sqrt(pow(trg_x, 2) + pow(trg_y, 2));
+  double N = time_steps; //trg_dist / (TIME_RES * ref_v);
   double x_add_on = 0;
-  for (int i = sz; i < TRAJ_STEPS; ++i) {
-    double N = trg_dist / (TIME_RES * ref_v);
+  double prev_x_point = 0;
+  double prev_y_point = spl(prev_x_point);
+  double cur_yaw = ref_yaw;
+  for (size_t t = 0; t < time_steps; ++t) {
     double x_point = x_add_on + trg_x / N;
     double y_point = spl(x_point);
-
     x_add_on = x_point;
     double x_ref = x_point;
     double y_ref = y_point;
@@ -367,8 +374,15 @@ void State::computeXYTrajectory(TrajData & td)
     x_point += ref_x;
     y_point += ref_y;
 
-    fsm_.next_x_vals_.push_back(x_point);
-    fsm_.next_y_vals_.push_back(y_point);
+    // Update cur_yaw
+    cur_yaw = atan2(y_point - prev_y_point, x_point - prev_x_point);
+    prev_x_point = x_point;
+    prev_y_point = y_point;
+
+    TrajNode tn; tn.x = x_point; tn.y = y_point; tn.s = 0; tn.d = 0;
+    forward_traj_.push_back(tn);
+//    fsm_.next_x_vals_.push_back(x_point);
+//    fsm_.next_y_vals_.push_back(y_point);
   }
 
   return;
@@ -380,11 +394,13 @@ void State::computeXYTrajectory(TrajData & td)
 void State::computeTrajectory(TrajData & td)
 {
   assert(td.time);
-  size_t sz = cur_traj_idx_ + fsm_.cxt_->path_x.size();
-  if (sz > forward_traj_.size()) forward_traj_.clear();
-  else forward_traj_.erase(forward_traj_.begin() + sz, forward_traj_.end());
-  //forward_traj_.clear();
-  //cur_traj_idx_  = 0;
+//  size_t sz = cur_traj_idx_ + fsm_.cxt_->path_x.size();
+//  if (sz > forward_traj_.size()) forward_traj_.clear();
+//  else forward_traj_.erase(forward_traj_.begin() + sz, forward_traj_.end());
+  forward_traj_.clear();
+  cur_traj_idx_  = 0;
+
+
   auto coeffs    = computePolyCoefficients(td);
   // Generate trajectory until we reach the required time
   double time    = TIME_RES;
@@ -600,9 +616,11 @@ ChangeLane::ChangeLane(FSM & fsm, double trg_speed, SensorData * sd) : State(fsm
   //fsm_.clearAll();
   p_ = fsm_.getMostRecentNotProcessed();
   fsm_.clearProcessed();
-  TrajData td = computeTargetPos(p_, sd);
+  //TrajData td = computeTargetPos(p_, sd);
   fsm_.prev_trg_speed_ = trg_speed_;
-  computeTrajectory(td); // Base class method
+  // TODO: hack!
+  p_.d = sd->d;
+  //computeTrajectory(td); // Base class method
   // Apply the new trajectory by creating the new next_x_vals and next_y_vals
   fsm_.applyTrajectory(p_, forward_traj_, cur_traj_idx_);
 }
@@ -674,12 +692,14 @@ void KeepLane::update()
 MatchSpeed::MatchSpeed(FSM & fsm, double trg_speed, SensorData * sd) : State(fsm, trg_speed)
 {
   if (DEBUG) std::cout << "MatchSpeed: creating new State\n";
-  p_ = fsm_.getLastProcessed();
-  //p_ = fsm_.getMostRecentNotProcessed();
-  fsm_.clearAll();
-  TrajData td = computeTargetPos(p_, sd);
+  //p_ = fsm_.getLastProcessed();
+  //fsm_.clearAll();
+  p_ = fsm_.getMostRecentNotProcessed();
+  fsm_.clearProcessed();
+  //TrajData td = computeTargetPos(p_, sd);
   fsm_.prev_trg_speed_ = trg_speed_;
-  computeTrajectory(td); // Base class method
+  //computeXYTrajectory(td);
+  //computeTrajectory(td); // Base class method
   // Apply the new trajectory by creating the new next_x_vals and next_y_vals
   fsm_.applyTrajectory(p_, forward_traj_, cur_traj_idx_);
 }
@@ -831,6 +851,249 @@ static TrajData initTrajData(size_t sz, double init_s, double init_speed, double
   return td;
 }
 
+static void printMovement(const Movement & m)
+{
+  double tot_v = sqrt(pow(m.vx, 2) + pow(m.vy, 2));
+  double tot_a = sqrt(pow(m.ax, 2) + pow(m.ay, 2));
+  std::cout << "Movement. yaw: " << m.yaw << " x: " << m.x << " y: " << m.y << " vx: " << m.vx <<
+      " vy: " << m.vy << " tot_v: " << tot_v << " ax: " << m.ax << " ay: " << m.ay << " tot_a: " <<
+      tot_a << std::endl;
+}
+
+Movement FSM::getLastPlannedMovement()
+{
+  size_t sz = next_x_vals_.size();
+  Movement m;
+  if (sz < 3) {
+    m.yaw = deg2rad(cxt_->yaw);
+    m.x = sz? next_x_vals_[sz-1]: cxt_->x;
+    m.y = sz? next_y_vals_[sz-1]: cxt_->y;
+    m.vx = m.vy = 0;
+    m.ax = m.ay = 0;
+    //prev_x = cxt_->x - cos(cxt_->yaw);
+    //prev_y = cxt_->y - sin(cxt_->yaw);
+  } else {
+    double x1 = next_x_vals_[sz-1];
+    double y1 = next_y_vals_[sz-1];
+    double x2 = next_x_vals_[sz-2];
+    double y2 = next_y_vals_[sz-2];
+    double x3 = next_x_vals_[sz-3];
+    double y3 = next_y_vals_[sz-3];
+    // TODO: assuming that is x1 == x2 then we are a right angle to the x axis.
+    if (x1 == x2) {
+      m.yaw = ((y1 - y2 > 0)? 1 : -1 ) * pi() / 2;
+      if (DEBUG) std::cout << "ATAN2 for same X's not defined, using: " << m.yaw << std::endl;
+    } else {
+      m.yaw = atan2(y1 - y2, x1 - x2);
+    }
+    m.x = x1;
+    m.y = y1;
+    m.vx = (x1 - x2) / TIME_RES;
+    m.vy = (y1 - y2) / TIME_RES;
+    double prev_vx = (x2 - x3) / TIME_RES;
+    double prev_vy = (y2 - y3) / TIME_RES;
+    m.ax = (m.vx - prev_vx) / TIME_RES;
+    m.ay = (m.vy - prev_vy) / TIME_RES;
+  }
+  return m;
+}
+
+static void updateLimitMovement(Movement & m, const Movement & prev_m, double trg_v)
+{
+  double & cur_vx = m.vx; //prev_speed * cos(yaw);
+  double & cur_vy = m.vy; //prev_speed * sin(yaw);
+  double & cur_ax = m.ax; //cur_vx - prev_vx;
+  double & cur_ay = m.ay; //cur_vy - prev_vy;
+  double prev_vx = prev_m.vx;
+  double prev_vy = prev_m.vy;
+  double prev_ax = prev_m.ax;
+  double prev_ay = prev_m.ay;
+//  double prev_tot_v = sqrt(pow(prev_vx, 2) + pow(prev_vy, 2));
+//  double prev_tot_a = sqrt(pow(prev_ax, 2) + pow(prev_ay, 2));
+//  double lim_vx = MAX_SPEED * MAX_SPEED_MAR * cos(m.yaw);
+//  double lim_vy = MAX_SPEED * MAX_SPEED_MAR * sin(m.yaw);
+//  double lim_ax = MAX_ACC * cos(m.yaw);
+//  double lim_ay = MAX_ACC * sin(m.yaw);
+//  double lim_jx = MAX_JERK * cos(m.yaw);
+//  double lim_jy = MAX_JERK * sin(m.yaw);
+
+  double lim_v = trg_v;
+  double lim_a = MAX_ACC;
+  double lim_j = MAX_JERK;
+
+  double tot_v = sqrt(pow(cur_vx, 2) + pow(cur_vy, 2));
+  if (tot_v > lim_v) {
+    if (DEBUG) std::cout << "limiting speed " << tot_v;
+    tot_v = lim_v;
+    cur_vx = tot_v * cos(prev_m.yaw) * (cur_vx > 0? 1: -1);
+    cur_vy = tot_v * sin(prev_m.yaw) * (cur_vy > 0? 1: -1);
+    if (DEBUG) std::cout << " tot_v: " << tot_v << " cur_vx: " << cur_vx << " cur_vy: " << cur_vy << std::endl;
+    cur_ax = (cur_vx - prev_vx) / TIME_RES;
+    cur_ay = (cur_vy - prev_vy) / TIME_RES;
+  }
+  //double tot_a = tot_v - prev_tot_v;
+  double tot_a = sqrt(pow(cur_ax, 2) + pow(cur_ay, 2));
+  if (tot_a > lim_a or tot_a < -lim_a) {
+    if (DEBUG) std::cout << "limiting acceleration " << tot_a;
+    tot_a = (tot_a > 0)? lim_a: -lim_a;
+    cur_ax = tot_a * cos(prev_m.yaw) * (cur_ax > 0? 1: -1);
+    cur_ay = tot_a * sin(prev_m.yaw) * (cur_ay > 0? 1: -1);
+    if (DEBUG) std::cout << " tot_a: " << tot_a << " cur_ax: " << cur_ax << " cur_ay: " << cur_ay << std::endl;
+    cur_vx = prev_vx + cur_ax * TIME_RES;
+    cur_vy = prev_vy + cur_ay * TIME_RES;
+  }
+  double cur_jx = (cur_ax - prev_ax) / TIME_RES;
+  double cur_jy = (cur_ay - prev_ay) / TIME_RES;
+  //double tot_j = tot_a - prev_tot_a;
+  double tot_j = sqrt(pow(cur_jx, 2) + pow(cur_jy, 2));
+  if (tot_j > lim_j or tot_j < -lim_j) {
+    if (DEBUG) std::cout << "limiting jerk " << tot_j;
+    tot_j = (tot_j > 0)? lim_j: -lim_j;
+    cur_jx = tot_j * cos(prev_m.yaw) * (cur_jx > 0? 1: -1);
+    cur_jy = tot_j * sin(prev_m.yaw) * (cur_jy > 0? 1: -1);
+    if (DEBUG) std::cout << " tot_j: " << tot_j << " cur_jx: " << cur_jx << " cur_jy: " << cur_jy << std::endl;
+    cur_ax = prev_ax + cur_jx * TIME_RES;
+    cur_ay = prev_ay + cur_jy * TIME_RES;
+    cur_vx = prev_vx + cur_ax * TIME_RES;
+    cur_vy = prev_vy + cur_ay * TIME_RES;
+  }
+//
+//  if (cur_vx > lim_vx or cur_vx < -lim_vx) {
+//    cur_vx = (cur_vx > 0)? lim_vx: -lim_vx;
+//    cur_ax = (cur_vx - prev_vx) / TIME_RES;
+//  }
+//  if (cur_vy > lim_vy or cur_vy < -lim_vy) {
+//    cur_vy = (cur_vy > 0)? lim_vy: -lim_vy;
+//    cur_ay = (cur_vy - prev_vy) / TIME_RES;
+//  }
+//  if (cur_ax > lim_ax or cur_ax < -lim_ax) {
+//    cur_ax = (cur_ax > 0)? lim_ax: -lim_ax;
+//    cur_vx = prev_vx + cur_ax * TIME_RES;
+//  }
+//  if (cur_ay > lim_ay or cur_ay < -lim_ay) {
+//    cur_ay = (cur_ay > 0)? lim_ay: -lim_ay;
+//    cur_vy = prev_vy + cur_ay * TIME_RES;
+//  }
+//
+//  double cur_jx = (cur_ax - prev_ax) / TIME_RES;
+//  if (cur_jx > MAX_JERK or cur_jx < -MAX_JERK) {
+//    cur_jx = (cur_jx > 0)? MAX_JERK: -MAX_JERK;
+//    cur_ax = prev_ax + cur_jx * TIME_RES;
+//    cur_vx = prev_vx + cur_ax * TIME_RES;
+//  }
+//  double cur_jy = (cur_ay - prev_ay) / TIME_RES;
+//  if (cur_jy > MAX_JERK or cur_jy < -MAX_JERK) {
+//    cur_jy = (cur_jy > 0)? MAX_JERK: -MAX_JERK;
+//    cur_ay = prev_ay + cur_jy * TIME_RES;
+//    cur_vy = prev_vy + cur_ay * TIME_RES;
+//  }
+}
+
+void FSM::createXYFromSpline(double trg_v, double d,  Movement & m, Movement & prev_m)
+{
+//  assert(td.time);
+  Context & cxt = *cxt_;
+  size_t sz = cxt.path_x.size();
+
+  // TODO: for now overriding to the previous trg_speed of the FSM
+  trg_v = prev_trg_speed_;
+//  size_t time_steps = ceil(td.time / TIME_RES);
+
+  // Here we need to start with two simple points close to our reference location
+  vector<double> xs, ys;
+  double ref_yaw = deg2rad(cxt.yaw);
+  double ref_x   = cxt.x;
+  double ref_y   = cxt.y;
+//  double ref_v   = td.init_speed;
+//  double trg_v   = td.final_speed;
+
+  if (sz < 2) {
+    double prev_x = ref_x - cos(ref_yaw);
+    double prev_y = ref_y - sin(ref_yaw);
+    xs.push_back(prev_x); ys.push_back(prev_y);
+  } else {
+    ref_x = cxt.path_x[sz-1];
+    ref_y = cxt.path_y[sz-1];
+    double ref_x_prev = cxt.path_x[sz-2];
+    double ref_y_prev = cxt.path_y[sz-2];
+    ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+    xs.push_back(ref_x_prev); ys.push_back(ref_y_prev);
+  }
+  xs.push_back(ref_x); ys.push_back(ref_y);
+
+  // Now we will add some more points further away
+  auto next_wp0 = getXY(cxt.s + 30, d, map_.s, map_.x, map_.y);
+  auto next_wp1 = getXY(cxt.s + 60, d, map_.s, map_.x, map_.y);
+  auto next_wp2 = getXY(cxt.s + 90, d, map_.s, map_.x, map_.y);
+  xs.push_back(next_wp0[0]); ys.push_back(next_wp0[1]);
+  xs.push_back(next_wp1[0]); ys.push_back(next_wp1[1]);
+  xs.push_back(next_wp2[0]); ys.push_back(next_wp2[1]);
+
+  // Now we need to transform these points to the car-local coordinates:
+  // The reference point is at (0,0) and the x axis points to our yaw angle.
+  // This way we can use the spline as f(x), and it would still behave as a function (single value of y for x)
+  for (int i = 0; i < xs.size(); ++i) {
+    double shift_x = xs[i] - ref_x;
+    double shift_y = ys[i] - ref_y;
+    xs[i] = (shift_x * cos(-ref_yaw) - shift_y * sin(-ref_yaw));
+    ys[i] = (shift_x * sin(-ref_yaw) + shift_y * cos(-ref_yaw));
+  }
+
+  tk::spline spl;
+  spl.set_points(xs, ys);
+
+  // How many point do I need to sample from the spline so that we still keep under our
+  // velocity and acceleration constraints?
+//  auto trg_xy = getXY(td.final_s, td.final_d, map_.s, map_.x, map_.y);
+  double trg_x = 30; //trg_xy[0];
+  double trg_y = spl(trg_x);
+  double trg_dist = sqrt(pow(trg_x, 2) + pow(trg_y, 2));
+  double N = trg_dist / (TIME_RES * trg_v);
+  double x_add_on = 0;
+  double prev_x_point = 0;
+  double prev_y_point = spl(prev_x_point);
+  double cur_yaw = ref_yaw;
+  for (size_t t = sz; t < TRAJ_STEPS; ++t) {
+    double x_point = x_add_on + trg_x / N;
+    double y_point = spl(x_point);
+    x_add_on = x_point;
+    double x_ref = x_point;
+    double y_ref = y_point;
+    // Re-translate to original world coordinates
+    x_point = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
+    y_point = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
+
+    x_point += ref_x;
+    y_point += ref_y;
+
+    if (DEBUG) { std::cout << "Prev "; printMovement(prev_m); }
+    updateLimitMovement(m, prev_m, trg_v);
+    if (DEBUG) { std::cout << "Updated "; printMovement(m); }
+
+    // Update cur_yaw
+    cur_yaw = atan2(y_point - prev_y_point, x_point - prev_x_point);
+    prev_x_point = x_point;
+    prev_y_point = y_point;
+
+    prev_m = m;
+    m = getLastPlannedMovement();
+//    TrajNode tn; tn.x = x_point; tn.y = y_point; tn.s = 0; tn.d = 0;
+    next_x_vals_.push_back(x_point);
+    next_y_vals_.push_back(y_point);
+    // Populate the rest of the values
+    auto cur_sd = getFrenet(x_point, y_point, cur_yaw, map_.x, map_.y);
+    next_s_vals_.push_back(cur_sd[0]);
+    next_d_vals_.push_back(d);
+    prev_acc_.push_back(sqrt(pow(m.ax, 2) + pow(m.ay, 2)));
+    prev_speed_.push_back(sqrt(pow(m.vx, 2) + pow(m.vy, 2)));
+    if (DEBUG) {
+      std::cout << "Added new trajectory step " << (t+1) << " with x: " << x_point << " y: " << y_point <<
+          " keep_speed: 1" << std::endl;
+    }
+  }
+}
+
+
 //
 // Method to apply the pre-computed trajectory
 //
@@ -844,22 +1107,26 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
   double prev_speed = cur_speed;
 
   updateLane(prev_d);
+  static Movement prev_m = getLastPlannedMovement();
 
-  SplineData * spd = nullptr;
   bool keep_speed = (cur_traj_idx >= forward_traj.size());
 
   size_t i = next_x_vals_.size();
 
-//  if (keep_speed) {
-//    TrajData td = initTrajData(i, prev_ns, prev_speed, prev_d);
-//    spd = getShortSplines(td);
-//  }
+  if (keep_speed) {
+    auto m = getLastPlannedMovement();
+    createXYFromSpline(cur_speed, prev_d, m, prev_m);
+    return;
+  }
 
   if (DEBUG) printPositionData("ApplyTrajectory", p);
 
   double time = 0;
   // Build the rest of the steps
+
   for (; i < TRAJ_STEPS; ++i) {
+    auto m = getLastPlannedMovement();
+    if (DEBUG) printMovement(m);
     // If we completed our computed trajectory, just change policy to keep current speed
     if (!keep_speed and cur_traj_idx + i >= forward_traj.size()) {
       //TrajData td = initTrajData(i, prev_ns, prev_speed, prev_d);
@@ -871,16 +1138,28 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
     time += TIME_RES;
     double nx, ny, ns, nd;
     if (keep_speed) {
-//      nx = spd->x(time);
-//      ny = spd->y(time);
-//      ns = spd->s(time);
+      if (DEBUG) std::cout << "CurYaw: " << m.yaw << " cos: " << cos(m.yaw) << " sin: " << sin(m.yaw) <<std::endl;
+      //double prev_vx = prev_speed * cos(yaw);
+      //double prev_vy = prev_speed * sin(yaw);
+      //double s_step = sqrt(pow(prev_vx * TIME_RES, 2) + pow(prev_vy * TIME_RES, 2));
+      auto prev_xy = getXY(prev_ns, prev_d, map_.s, map_.x, map_.y);
+      if (DEBUG) { std::cout << "Prev "; printMovement(prev_m); }
+      updateLimitMovement(m, prev_m, cur_speed);
+      if (DEBUG) { std::cout << "Updated "; printMovement(m); }
+      //nx = prev_xy[0] + m.vx * TIME_RES;
+      //ny = prev_xy[1] + m.vy * TIME_RES;
+      nx = next_x_vals_.back() + m.vx * TIME_RES;
+      ny = next_y_vals_.back() + m.vy * TIME_RES;
+      //double s_step = fmax(prev_speed * cos(yaw), prev_speed * sin(yaw)) * TIME_RES;
+      //ns = prev_ns + s_step;//prev_speed * TIME_RES;
+      auto next_sd = getFrenet(nx, ny, m.yaw, map_.x, map_.y);
+      ns = next_sd[0];
+      nd = next_sd[1];
+      //ns = fmod(ns, MAX_S);
 //      nd = prev_d;
-      ns = prev_ns + prev_speed * TIME_RES;  // TODO: perhaps use prev_speed?
-      ns = fmod(ns, MAX_S);
-      nd = prev_d;
-      auto vecXY = getXYfromSpline(ns, nd);
-      nx = vecXY[0];
-      ny = vecXY[1];
+//      auto vecXY = getXYfromSpline(ns, nd);
+//      nx = vecXY[0];
+//      ny = vecXY[1];
     } else {
       nx = forward_traj[cur_traj_idx + i].x;
       ny = forward_traj[cur_traj_idx + i].y;
@@ -888,8 +1167,9 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
       nd = forward_traj[cur_traj_idx + i].d;
     }
     if (DEBUG) {
-      std::cout << "Added new trajectory step " << (i+1) << " with s: " << ns << " d: " << nd << " speed: " << cur_speed <<
-          " acc: " << cur_acc << " keep_speed: " << keep_speed << std::endl;
+      std::cout << "Added new trajectory step " << (i+1) << " with x: " << nx << " y: " << ny << " s: " <<
+          ns << " d: " << nd << " speed: " << cur_speed << " acc: " << cur_acc << " keep_speed: " <<
+          keep_speed << std::endl;
     }
     next_x_vals_.push_back(nx);
     next_y_vals_.push_back(ny);
@@ -906,8 +1186,8 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
     prev_speed = cur_speed;
     prev_acc_.push_back(cur_acc);
     prev_speed_.push_back(cur_speed);
+    prev_m     = m;
   }
-  if (spd) delete spd;
 }
 
 //
@@ -1006,8 +1286,8 @@ void FSM::update(Context & cxt)
   if (DEBUG) {
     static int stepCnt = 0;
     std::cout << "================================================================================\n";
-    std::cout << "[Step " << stepCnt << "] Current internal state  (s,d,x,y,v,a): (" <<
-        p.s << ", " << p.d << ", " << p.x << ", " << p.y << ", " << p.v << ", " << p.a << ")\n";
+    std::cout << "[Step " << stepCnt << "] Current internal state  (s,d,x,y,yaw,v,a): (" <<
+        p.s << ", " << p.d << ", " << p.x << ", " << p.y << ", " << deg2rad(cxt_->yaw) << ", " << p.v << ", " << p.a << ")\n";
     std::cout << "State target speed: : " << state_->getTargetSpeed() << std::endl;
     stepCnt += (TRAJ_STEPS - sz);
     std::cout << "FSM update. Server processed " << (TRAJ_STEPS - sz) << " points" << std::endl;
