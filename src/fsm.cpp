@@ -851,6 +851,10 @@ static TrajData initTrajData(size_t sz, double init_s, double init_speed, double
   return td;
 }
 
+/**
+ * Helper function to print Movement structure data
+ * @param m The movement to print
+ */
 static void printMovement(const Movement & m)
 {
   double tot_v = sqrt(pow(m.vx, 2) + pow(m.vy, 2));
@@ -860,6 +864,10 @@ static void printMovement(const Movement & m)
       tot_a << std::endl;
 }
 
+/**
+ * Method to get the last movement that was planned
+ * @return Movement structure containing last movement
+ */
 Movement FSM::getLastPlannedMovement()
 {
   size_t sz = next_x_vals_.size();
@@ -898,6 +906,14 @@ Movement FSM::getLastPlannedMovement()
   return m;
 }
 
+
+/**
+ * Helper function to limit the proposed movement so that no constraint violations happen
+ * @param m Proposed movement
+ * @param prev_m Previous movement
+ * @param trg_v Target velocity to use as a constraint
+ * @return True if there was an limiting update, False otherwise
+ */
 static void updateLimitMovement(Movement & m, const Movement & prev_m, double trg_v)
 {
   double & cur_vx = m.vx; //prev_speed * cos(yaw);
@@ -989,8 +1005,61 @@ static void updateLimitMovement(Movement & m, const Movement & prev_m, double tr
 //  }
 }
 
+/**
+ * A method to compute the next world X and Y coordinates and add them to the FSM.
+ * @param start_x The starting point in the x axis in car-local coords.
+ * @param step_x The step to try and use. Will be limited if violating constraints.
+ * @param spl The Spline to use for interpolation
+ * @param ref_yaw The reference point world YAW for translation between car and world coords.
+ * @param ref_x The reference point world X for translation between car and world coords.
+ * @param ref_y The reference point world Y for translation between car and world coords.
+ */
+void FSM::computeNextXY(double start_x, double step_x, tk::spline & spl,
+    double ref_yaw, double ref_x, double ref_y)
+{
+  double x_point = start_x + step_x;
+  double y_point = spl(x_point);
+
+  double x_ref = x_point;
+  double y_ref = y_point;
+
+  // Re-translate to original world coordinates
+  x_point = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
+  y_point = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
+  x_point += ref_x;
+  y_point += ref_y;
+
+  next_x_vals_.push_back(x_point);
+  next_y_vals_.push_back(y_point);
+}
+
+/**
+ * Method to translate World coordinates to local car coordinates
+ * @param x The world X coordinate
+ * @param y The world Y coordinate
+ * @param ref_yaw The reference point world YAW for translation between car and world coords.
+ * @param ref_x The reference point world X for translation between car and world coords.
+ * @param ref_y The reference point world Y for translation between car and world coords.
+ * @return The pair of X, Y local car coords.
+ */
+inline static std::pair<double, double>
+translateToCarCoords(double x, double y, double ref_yaw, double ref_x, double ref_y)
+{
+  double shift_x = x - ref_x;
+  double shift_y = y - ref_y;
+  double nx = (shift_x * cos(-ref_yaw) - shift_y * sin(-ref_yaw));
+  double ny = (shift_x * sin(-ref_yaw) + shift_y * cos(-ref_yaw));
+  return {nx, ny};
+}
+
+/**
+ * Method to populate the future X,Y trajectory based on a Spline interpolation
+ * @param trg_v Traget speed
+ * @param d Current d Frenet value
+ */
 void FSM::createXYFromSpline(double trg_v, double d,  Movement & m, Movement & prev_m)
 {
+  if (DEBUG) std::cout << "Target speed for Spline: " << trg_v << std::endl;
 //  assert(td.time);
   Context & cxt = *cxt_;
   size_t sz = cxt.path_x.size();

@@ -181,6 +181,8 @@ public:
 
   void generateFullSplines();
   void createXYFromSpline(double trg_v, double d, Movement & m, Movement & prev_m);
+  void computeNextXY(double start_x, double step_x, tk::spline & spl,
+      double ref_yaw, double ref_x, double ref_y);
   SplineData * getShortSplines(TrajData & td);
   std::vector<double> getXYfromSpline(double s, double d_offset);
   TrajData computeMatchTargetSpeed(double init_s, double init_d, double init_speed, double init_acc,
