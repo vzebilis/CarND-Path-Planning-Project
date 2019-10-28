@@ -129,6 +129,7 @@ public:
     virtual Policy nextPolicy() = 0;
     virtual TrajData computeTargetPos(PositionData & p, SensorData * sd) { return {}; }
     virtual void computeTrajectory(TrajData & td);
+    virtual void matchTargetSpeed(double d, double trg_v);
     // NON-VIRTUAL
     void computeXYTrajectory(TrajData & td);
     double getTargetSpeed() const { return trg_speed_; }
@@ -180,7 +181,9 @@ public:
   double                delta_speed_to_zero_acc_;
 
   void generateFullSplines();
-  void createXYFromSpline(double trg_v, double d, Movement & m, Movement & prev_m);
+  void matchCarSpeed(double init_s, double init_d, double final_s, double final_d, double final_v);
+  tk::spline * createLocalSpline(double d, const Movement & prev_m, double & ref_x, double & ref_y, double & ref_yaw);
+  void createXYFromSpline(double trg_v, double d, Movement & prev_m);
   void computeNextXY(double start_x, double step_x, tk::spline & spl,
       double ref_yaw, double ref_x, double ref_y);
   SplineData * getShortSplines(TrajData & td);
@@ -205,7 +208,7 @@ public:
   PositionData getLastProcessed() const;
   PositionData getMostRecentNotProcessed() const;
   void incrementByProcessed(size_t & val) const;
-  void applyTrajectory(PositionData & p, std::vector<TrajNode> & forward_traj, size_t cur_traj_idx);
+  void applyTrajectory(PositionData & p, std::vector<TrajNode> & forward_traj, size_t & cur_traj_idx);
   std::pair<std::vector<double>, std::vector<double>> getNextXYVals() { return {next_x_vals_, next_y_vals_}; }
 };
 

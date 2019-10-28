@@ -50,6 +50,59 @@ static vector<double> computePolyCoefficients(TrajData & traj_data)
   return {ss, ssd, ssdd * 0.5, a345[0], a345[1], a345[2]};
 }
 
+/**
+ * Helper function to print Movement structure data
+ * @param m The movement to print
+ */
+static void printMovement(const Movement & m)
+{
+  double tot_v = sqrt(pow(m.vx, 2) + pow(m.vy, 2));
+  double tot_a = sqrt(pow(m.ax, 2) + pow(m.ay, 2));
+  std::cout << "Movement. yaw: " << m.yaw << " x: " << m.x << " y: " << m.y << " vx: " << m.vx <<
+      " vy: " << m.vy << " tot_v: " << tot_v << " ax: " << m.ax << " ay: " << m.ay << " tot_a: " <<
+      tot_a << std::endl;
+}
+
+/**
+ * Helper function to translate World coordinates to local car coordinates
+ * @param x The world X coordinate
+ * @param y The world Y coordinate
+ * @param ref_yaw The reference point world YAW for translation between car and world coords.
+ * @param ref_x The reference point world X for translation between car and world coords.
+ * @param ref_y The reference point world Y for translation between car and world coords.
+ * @return A vector of X, Y local car coords.
+ */
+inline static std::vector<double>
+translateToCarCoords(double x, double y, double ref_yaw, double ref_x, double ref_y)
+{
+  double shift_x = x - ref_x;
+  double shift_y = y - ref_y;
+  double nx = (shift_x * cos(-ref_yaw) - shift_y * sin(-ref_yaw));
+  double ny = (shift_x * sin(-ref_yaw) + shift_y * cos(-ref_yaw));
+  return {nx, ny};
+}
+
+/**
+ * Helper function to translate car local coordinates to world coords
+ * @param x The car local X coordinate
+ * @param y The car local Y coordinate
+ * @param ref_yaw The reference point world YAW for translation between car and world coords.
+ * @param ref_x The reference point world X for translation between car and world coords.
+ * @param ref_y The reference point world Y for translation between car and world coords.
+ * @return A vector of X, Y world coords.
+ */
+static std::vector<double> translateToWorldCoords(double x, double y, double ref_yaw, double ref_x, double ref_y)
+{
+  double x_ref = x;
+  double y_ref = y;
+  // Re-translate to original world coordinates
+  x = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
+  y = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
+
+  x += ref_x;
+  y += ref_y;
+  return {x, y};
+}
 
 // Transform from Frenet s coordinate to Cartesian x,y using Splines.
 // d_offset is the lane offset (2: left lane, 6: middle lane, 10: right lane)
@@ -84,6 +137,7 @@ vector<double> FSM::getXYfromSpline(double s, double d_offset)
   return {x,y};
 }
 
+
 FSM::FSM(const Map & map) : 
   state_(nullptr), first_time_(true), cxt_(nullptr), prev_pol_(KEEP_LANE), map_(map),
   prev_trg_speed_(0), delta_speed_to_zero_acc_(0)
@@ -114,6 +168,227 @@ void FSM::generateFullSplines()
   spd_.y.set_points(map_.s, map_.y);
   spd_.dx.set_points(map_.s, map_.dx);
   spd_.dy.set_points(map_.s, map_.dy);
+}
+
+// Method to compute and return the minimum amount of road length and time
+// it would take to match target speed with 0 final acceleration
+void FSM::matchCarSpeed(double init_s, double init_d, double final_s, double final_d, double final_v)
+{
+  Movement m = getLastPlannedMovement();
+  double v_tot = sqrt(pow(m.vx, 2) + pow(m.vy, 2));
+  double a_tot = sqrt(pow(m.ax, 2) + pow(m.ay, 2));
+  assert(init_s  >= 0);
+  assert(final_v <= MAX_SPEED);
+
+  if (DEBUG) std::cout << "Try to match target speed: " << final_v << std::endl;
+
+  double delta_v = final_v - v_tot;
+  // If we are already at the target speed, with zero acceleration, then nothing to do
+  if (delta_v > 0 and delta_v < 0.1 and isZero(a_tot)) return;
+
+
+  // How many timesteps do we need at least to shed our initial acceleration?
+  int shed_acc_steps      = ceil((fabs(a_tot) / MAX_JERK) / TIME_RES);
+  double delta_speed_shed = 0;
+  double a_shed           = 0;
+  double a_jerk           = (a_tot > 0)? -MAX_JERK: MAX_JERK;
+  // How much speed are we going to add while shedding initial acceleration?
+  for (int i = 0; i < shed_acc_steps; ++i) {
+    a_shed               += a_jerk * TIME_RES;
+    delta_speed_shed     += a_shed * TIME_RES;
+  }
+  const bool accel = delta_v + delta_speed_shed >= 0;
+
+  // The flip point: speed at which to switch from accelerating to decelerating or vice versa
+  double flip_point = v_tot + (delta_v + delta_speed_shed) / 2;
+  double T = 0;
+  double S = init_s;
+  double cur_speed = v_tot;
+  double cur_acc = a_tot;
+  double cur_x = m.x;
+  double cur_yaw = m.yaw;
+  while (((accel)? final_v > cur_speed: cur_speed > final_v)) {
+    Movement prev_m = m;
+    if (DEBUG) {
+      std::cout << "Cur speed: " << cur_speed << " Cur acc: " << cur_acc << " Cur S: " << S <<
+                   " Speed flip point: " << flip_point << std::endl;
+    }
+    T           += TIME_RES;
+    S           += cur_speed * TIME_RES;
+
+    cur_x += cur_speed * cos(cur_yaw);
+
+    cur_speed   += cur_acc * TIME_RES;
+    bool flipped = (accel)? cur_speed > flip_point: cur_speed < flip_point;
+    double jerk  = (accel)? MAX_JERK: -MAX_JERK;
+    jerk         = (flipped)? -jerk: jerk;
+    cur_acc     += jerk * TIME_RES;
+    if (fabs(cur_acc) >= MAX_ACC) {
+      cur_acc = (cur_acc > 0)? MAX_ACC: -MAX_ACC;
+      // Update flip point as well
+      flip_point = final_v + ((cur_acc > 0)? -1: 1) * delta_speed_to_zero_acc_;
+    }
+    if (flipped and isZero(cur_acc)) break;
+  }
+
+
+}
+
+void State::matchTargetSpeed(double d, double trg_v)
+{
+  if (DEBUG) std::cout << "Target speed to match: " << trg_v << std::endl;
+  forward_traj_.clear();
+  cur_traj_idx_ = 0;
+
+  Movement prev_m = fsm_.getLastPlannedMovement();
+//
+//  // Create a local spline for use with local car coords
+//  double ref_x, ref_y, ref_yaw;
+//  std::unique_ptr<tk::spline> spl(fsm_.createLocalSpline(d, prev_m, ref_x, ref_y, ref_yaw));
+//
+//  double trg_x = 30; //trg_xy[0];
+//  double trg_y = (*spl)(trg_x);
+//  double trg_dist = sqrt(pow(trg_x, 2) + pow(trg_y, 2));
+//  double N = trg_dist / (TIME_RES * trg_v);
+//  double x_add_on = 0; // Always in car-local coords
+//  double prev_x_point = prev_m.x; //0;
+//  double prev_y_point = prev_m.y; //(*spl)(prev_x_point);
+//  double cur_yaw = ref_yaw;
+
+
+  double x_step = 0;
+  double vx = prev_m.vx;
+  double vy = prev_m.vy;
+  double ax = prev_m.ax;
+  double ay = prev_m.ay;
+  double tot_v = sqrt(pow(vx, 2) + pow(vy, 2));
+  double tot_a = sqrt(pow(ax, 2) + pow(ay, 2));
+
+  double delta_v = trg_v - tot_v;
+  // If we are already at the target speed, with zero acceleration, then nothing to do
+  if (delta_v > 0 and delta_v < 0.1 and isZero(tot_a)) return;
+
+
+  // How many timesteps do we need at least to shed our initial acceleration?
+  int shed_acc_steps      = ceil((fabs(tot_a) / MAX_JERK) / TIME_RES);
+  double delta_speed_shed = 0;
+  double a_shed           = 0;
+  double a_jerk           = (tot_a > 0)? -MAX_JERK: MAX_JERK;
+  // How much speed are we going to add while shedding initial acceleration?
+  for (int i = 0; i < shed_acc_steps; ++i) {
+    a_shed               += a_jerk * TIME_RES;
+    delta_speed_shed     += a_shed * TIME_RES;
+  }
+  const bool accel = delta_v + delta_speed_shed >= 0;
+
+  if (DEBUG) std::cout << "MatchTargetSpeed: initial acc: " << tot_a << ". Need to shed for dv: " <<
+      delta_speed_shed << std::endl;
+
+  // The flip point: speed at which to switch from accelerating to decelerating or vice versa
+  double flip_point = tot_v + (delta_v + delta_speed_shed) / 2;
+  if (DEBUG) std::cout << "MatchTargetSpeed: initial flip_point " << flip_point << std::endl;
+
+  //double T = 0;
+  double cur_x = prev_m.x;
+  double cur_y = prev_m.y;
+  double cur_speed = tot_v;
+  double cur_acc = tot_a;
+  double cur_yaw = prev_m.yaw;
+  double prev_x = cur_x;
+  double prev_y = cur_y;
+  if (DEBUG) std::cout << "MatchTargetSpeed: " << (accel? "accelerating": "decelerating") << std::endl;
+
+  while (((accel)? trg_v > cur_speed: cur_speed > trg_v)) {
+    //T           += TIME_RES;
+    cur_x       += vx * TIME_RES;
+    cur_y       += vy * TIME_RES;
+    vx          += ax * TIME_RES;
+    vy          += ay * TIME_RES;
+    cur_speed   = sqrt(pow(vx, 2) + pow(vy, 2));
+    bool flipped = (accel)? cur_speed > flip_point: cur_speed < flip_point;
+    if (flipped and DEBUG) std::cout << "FLIPPED!" << std::end;
+    double jerk  = (accel)? MAX_JERK: -MAX_JERK;
+    jerk         = (flipped)? -jerk: jerk;
+    double jx    = jerk * cos(cur_yaw);
+    double jy    = jerk * sin(cur_yaw);
+    double n_ax  = ax + jx * TIME_RES;
+    double n_ay  = ay + jy * TIME_RES;
+    cur_acc      = sqrt(pow(n_ax, 2) + pow(n_ay, 2));
+    if (fabs(cur_acc) >= MAX_ACC) {
+      cur_acc = (cur_acc > 0)? MAX_ACC: -MAX_ACC;
+      ax = ((ax > 0)? 1: -1) * cur_acc * cos(cur_yaw);
+      ay = ((ay > 0)? 1: -1) * cur_acc * sin(cur_yaw);
+      // Update flip point as well
+      flip_point = trg_v + (accel? -1: 1) * fsm_.delta_speed_to_zero_acc_;
+      if (DEBUG) std::cout << "MatchTargetSpeed: updated flip_point " << flip_point << std::endl;
+    } else {
+      ax = n_ax;
+      ay = n_ay;
+    }
+    if (!accel) cur_acc = -cur_acc;
+    cur_yaw = atan2(cur_y - prev_y, cur_x - prev_x);
+    prev_x = cur_x;
+    prev_y = cur_y;
+
+    forward_traj_.emplace_back();
+    TrajNode & tn = forward_traj_.back();
+    tn.x = cur_x;
+    tn.y = cur_y;
+    auto cur_sd = getFrenet(cur_x, cur_y, cur_yaw, fsm_.map_.x, fsm_.map_.y);
+    tn.s = cur_sd[0];
+    tn.d = d;
+
+    if (DEBUG) {
+      std::cout << "Cur speed: " << cur_speed << " Cur acc: " << cur_acc << " Cur x: " << cur_x <<
+          " y: " << cur_y << " vx: " << vx << " vy: " << vy << " ax: " << ax << " ay: " << ay << std::endl;
+    }
+
+    if (flipped and isZero(cur_acc)) break;
+  }
+  if (DEBUG) std::cout << "MatchTargetSpeed: computed trajectory of " << forward_traj_.size() << " steps\n";
+
+//  while (true) {
+//    double x_point = x_add_on + trg_x / N;
+//    double y_point = (*spl)(x_point);
+//    auto world_xy = translateToWorldCoords(x_point, y_point, ref_yaw, ref_x, ref_y);
+//    x_add_on = x_point;
+//    x_point = world_xy[0];
+//    y_point = world_xy[1];
+//
+//    Movement m = fsm_.getLastPlannedMovement();
+//
+//    //    auto m = getLastPlannedMovement();
+//    //    if (DEBUG) { std::cout << "Prev "; printMovement(prev_m); }
+//    if (DEBUG) { std::cout << "Attempt "; printMovement(m); }
+//    //    if (updateLimitMovement(m, prev_m, trg_v)) {
+//    //      if (DEBUG) { std::cout << "Updated "; printMovement(m); }
+//    //      //next_x_vals_.back() = x_point = m.x;
+//    //      //next_y_vals_.back() = y_point = m.y;
+//    //    }
+//
+//    // Update cur_yaw
+//    cur_yaw = atan2(y_point - prev_y_point, x_point - prev_x_point);
+//    prev_x_point = x_point;
+//    prev_y_point = y_point;
+//
+//    // Populate the rest of the values
+//    forward_traj_.emplace_back();
+//    TrajNode & tn = forward_traj_.back();
+//    tn.d = d;
+//
+//    next_x_vals_.push_back(x_point);
+//    next_y_vals_.push_back(y_point);
+//    auto cur_sd = getFrenet(x_point, y_point, cur_yaw, map_.x, map_.y);
+//    next_s_vals_.push_back(cur_sd[0]);
+//    next_d_vals_.push_back(d);
+//    prev_acc_.push_back(sqrt(pow(m.ax, 2) + pow(m.ay, 2)));
+//    prev_speed_.push_back(sqrt(pow(m.vx, 2) + pow(m.vy, 2)));
+//    if (DEBUG) {
+//      std::cout << "Added new trajectory step " << (t+1) << " with x: " << x_point << " y: " << y_point <<
+//          " keep_speed: 1" << std::endl;
+//    }
+//    prev_m = m;
+//  }
 }
 
 // Method to compute and return the minimum amount of road length and time
@@ -263,7 +538,6 @@ SplineData * FSM::getShortSplines(TrajData & td)
 //
 //
 //
-
 void ChangeLane::computeTrajectory(TrajData & td)
 {
   forward_traj_.clear();
@@ -527,12 +801,28 @@ bool FSM::canChangeLane(const PositionData & p, SensorData & ahead, SensorData &
   }
   return true;
 }
+
+static std::string printLane(Lane lane)
+{
+  switch (lane) {
+  case CENTER:
+    return "CENTER";
+  case LEFT:
+    return "LEFT";
+  case RIGHT:
+    return "RIGHT";
+  default:
+    assert(false);
+  }
+  return "";
+}
+
 //
 // Function to check which of the available lanes is best to use
 //
 SensorData FSM::checkLanes(const PositionData & p)
 {
-  if (DEBUG) std::cout << "checkLanes: current lane: " << lane_ << std::endl;
+  if (DEBUG) std::cout << "checkLanes: current lane: " << printLane(lane_) << std::endl;
   // Check same lane
   SensorData best = getSensorFusion(p, *cxt_, true, 0); best.d = p.d; best.pol = KEEP_LANE;
 
@@ -544,6 +834,12 @@ SensorData FSM::checkLanes(const PositionData & p)
       return best;
     }
   }
+  // DEBUG DEBUG DEBUG DEBUG
+  // DEBUG DEBUG DEBUG DEBUG
+  // DEBUG DEBUG DEBUG DEBUG
+  // TODO: for now skip changing lanes
+  return best;
+
   if (DEBUG and best.s != -1)
       std::cout << "Car in the same lane: " << best.id << " s: " << best.s << " d: " << best.d << " v: " << best.v << std::endl;
 
@@ -697,6 +993,7 @@ MatchSpeed::MatchSpeed(FSM & fsm, double trg_speed, SensorData * sd) : State(fsm
   p_ = fsm_.getMostRecentNotProcessed();
   fsm_.clearProcessed();
   //TrajData td = computeTargetPos(p_, sd);
+  matchTargetSpeed(sd? sd->d: p_.d, trg_speed);
   fsm_.prev_trg_speed_ = trg_speed_;
   //computeXYTrajectory(td);
   //computeTrajectory(td); // Base class method
@@ -712,7 +1009,7 @@ void MatchSpeed::update()
   p_ = fsm_.getMostRecentNotProcessed();
   // Clear old processed data on the FSM
   fsm_.clearProcessed();
-  fsm_.incrementByProcessed(cur_traj_idx_);
+  //fsm_.incrementByProcessed(cur_traj_idx_);
   // Apply the new trajectory by creating the new next_x_vals and next_y_vals
   fsm_.applyTrajectory(p_, forward_traj_, cur_traj_idx_);
 }
@@ -852,19 +1149,6 @@ static TrajData initTrajData(size_t sz, double init_s, double init_speed, double
 }
 
 /**
- * Helper function to print Movement structure data
- * @param m The movement to print
- */
-static void printMovement(const Movement & m)
-{
-  double tot_v = sqrt(pow(m.vx, 2) + pow(m.vy, 2));
-  double tot_a = sqrt(pow(m.ax, 2) + pow(m.ay, 2));
-  std::cout << "Movement. yaw: " << m.yaw << " x: " << m.x << " y: " << m.y << " vx: " << m.vx <<
-      " vy: " << m.vy << " tot_v: " << tot_v << " ax: " << m.ax << " ay: " << m.ay << " tot_a: " <<
-      tot_a << std::endl;
-}
-
-/**
  * Method to get the last movement that was planned
  * @return Movement structure containing last movement
  */
@@ -889,7 +1173,7 @@ Movement FSM::getLastPlannedMovement()
     double y3 = next_y_vals_[sz-3];
     // TODO: assuming that is x1 == x2 then we are a right angle to the x axis.
     if (x1 == x2) {
-      m.yaw = ((y1 - y2 > 0)? 1 : -1 ) * pi() / 2;
+      m.yaw = cxt_->yaw;//((y1 - y2 > 0)? 1 : -1 ) * pi() / 2;
       if (DEBUG) std::cout << "ATAN2 for same X's not defined, using: " << m.yaw << std::endl;
     } else {
       m.yaw = atan2(y1 - y2, x1 - x2);
@@ -914,7 +1198,7 @@ Movement FSM::getLastPlannedMovement()
  * @param trg_v Target velocity to use as a constraint
  * @return True if there was an limiting update, False otherwise
  */
-static void updateLimitMovement(Movement & m, const Movement & prev_m, double trg_v)
+static bool updateLimitMovement(Movement & m, const Movement & prev_m, double trg_v)
 {
   double & cur_vx = m.vx; //prev_speed * cos(yaw);
   double & cur_vy = m.vy; //prev_speed * sin(yaw);
@@ -937,8 +1221,14 @@ static void updateLimitMovement(Movement & m, const Movement & prev_m, double tr
   double lim_a = MAX_ACC;
   double lim_j = MAX_JERK;
 
+  bool updated = false;
+
+  //
+  // Limit velocity to the target one
+  //
   double tot_v = sqrt(pow(cur_vx, 2) + pow(cur_vy, 2));
   if (tot_v > lim_v) {
+    updated = true;
     if (DEBUG) std::cout << "limiting speed " << tot_v;
     tot_v = lim_v;
     cur_vx = tot_v * cos(prev_m.yaw) * (cur_vx > 0? 1: -1);
@@ -948,8 +1238,13 @@ static void updateLimitMovement(Movement & m, const Movement & prev_m, double tr
     cur_ay = (cur_vy - prev_vy) / TIME_RES;
   }
   //double tot_a = tot_v - prev_tot_v;
+
+  //
+  // Limit acceleration to +/- max one and update velocity accordingly
+  //
   double tot_a = sqrt(pow(cur_ax, 2) + pow(cur_ay, 2));
   if (tot_a > lim_a or tot_a < -lim_a) {
+    updated = true;
     if (DEBUG) std::cout << "limiting acceleration " << tot_a;
     tot_a = (tot_a > 0)? lim_a: -lim_a;
     cur_ax = tot_a * cos(prev_m.yaw) * (cur_ax > 0? 1: -1);
@@ -958,11 +1253,16 @@ static void updateLimitMovement(Movement & m, const Movement & prev_m, double tr
     cur_vx = prev_vx + cur_ax * TIME_RES;
     cur_vy = prev_vy + cur_ay * TIME_RES;
   }
+
+  //
+  // Limit jerk to +/- max one and update acceleration and velocity accordingly
+  //
   double cur_jx = (cur_ax - prev_ax) / TIME_RES;
   double cur_jy = (cur_ay - prev_ay) / TIME_RES;
   //double tot_j = tot_a - prev_tot_a;
   double tot_j = sqrt(pow(cur_jx, 2) + pow(cur_jy, 2));
   if (tot_j > lim_j or tot_j < -lim_j) {
+    updated = true;
     if (DEBUG) std::cout << "limiting jerk " << tot_j;
     tot_j = (tot_j > 0)? lim_j: -lim_j;
     cur_jx = tot_j * cos(prev_m.yaw) * (cur_jx > 0? 1: -1);
@@ -973,6 +1273,13 @@ static void updateLimitMovement(Movement & m, const Movement & prev_m, double tr
     cur_vx = prev_vx + cur_ax * TIME_RES;
     cur_vy = prev_vy + cur_ay * TIME_RES;
   }
+  // Update the movement X, Y coords if VX and VY actually changed
+  if (updated) {
+    m.x = prev_m.x + m.vx * TIME_RES;
+    m.y = prev_m.y + m.vy * TIME_RES;
+  }
+
+  return updated;
 //
 //  if (cur_vx > lim_vx or cur_vx < -lim_vx) {
 //    cur_vx = (cur_vx > 0)? lim_vx: -lim_vx;
@@ -1034,66 +1341,60 @@ void FSM::computeNextXY(double start_x, double step_x, tk::spline & spl,
 }
 
 /**
- * Method to translate World coordinates to local car coordinates
- * @param x The world X coordinate
- * @param y The world Y coordinate
- * @param ref_yaw The reference point world YAW for translation between car and world coords.
- * @param ref_x The reference point world X for translation between car and world coords.
- * @param ref_y The reference point world Y for translation between car and world coords.
- * @return The pair of X, Y local car coords.
+ * Method to generate a spline based on current position, previous couple ones,
+ * and certain points on the road ahead, spaced by 30 meters
+ * @param d. The target d position for the car
+ * @param prev_m. The previous movement details
+ * @param ref_x. Will output the x for translation between world/car coords
+ * @param ref_y. Will output the y for translation between world/car coords
+ * @param ref_yaw. Will output the ref_yaw for translation between world/car coords
+ * @return Will return a spline created for use with local car coords
  */
-inline static std::pair<double, double>
-translateToCarCoords(double x, double y, double ref_yaw, double ref_x, double ref_y)
+tk::spline * FSM::createLocalSpline(double d, const Movement & prev_m,
+    double & ref_x, double & ref_y, double & ref_yaw)
 {
-  double shift_x = x - ref_x;
-  double shift_y = y - ref_y;
-  double nx = (shift_x * cos(-ref_yaw) - shift_y * sin(-ref_yaw));
-  double ny = (shift_x * sin(-ref_yaw) + shift_y * cos(-ref_yaw));
-  return {nx, ny};
-}
-
-/**
- * Method to populate the future X,Y trajectory based on a Spline interpolation
- * @param trg_v Traget speed
- * @param d Current d Frenet value
- */
-void FSM::createXYFromSpline(double trg_v, double d,  Movement & m, Movement & prev_m)
-{
-  if (DEBUG) std::cout << "Target speed for Spline: " << trg_v << std::endl;
-//  assert(td.time);
   Context & cxt = *cxt_;
-  size_t sz = cxt.path_x.size();
-
-  // TODO: for now overriding to the previous trg_speed of the FSM
-  trg_v = prev_trg_speed_;
-//  size_t time_steps = ceil(td.time / TIME_RES);
+//  size_t sz = cxt.path_x.size();
+  size_t sz = next_x_vals_.size();
 
   // Here we need to start with two simple points close to our reference location
   vector<double> xs, ys;
-  double ref_yaw = deg2rad(cxt.yaw);
-  double ref_x   = cxt.x;
-  double ref_y   = cxt.y;
-//  double ref_v   = td.init_speed;
-//  double trg_v   = td.final_speed;
+  ref_yaw = deg2rad(cxt.yaw);
+  ref_x   = cxt.x;
+  ref_y   = cxt.y;
 
   if (sz < 2) {
     double prev_x = ref_x - cos(ref_yaw);
     double prev_y = ref_y - sin(ref_yaw);
     xs.push_back(prev_x); ys.push_back(prev_y);
   } else {
-    ref_x = cxt.path_x[sz-1];
-    ref_y = cxt.path_y[sz-1];
-    double ref_x_prev = cxt.path_x[sz-2];
-    double ref_y_prev = cxt.path_y[sz-2];
+//    ref_x = cxt.path_x[sz-1];
+//    ref_y = cxt.path_y[sz-1];
+//    double ref_x_prev = cxt.path_x[sz-2];
+//    double ref_y_prev = cxt.path_y[sz-2];
+    ref_x = next_x_vals_[sz-1];
+    ref_y = next_y_vals_[sz-1];
+    double ref_x_prev = next_x_vals_[sz-2];
+    double ref_y_prev = next_y_vals_[sz-2];
     ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
     xs.push_back(ref_x_prev); ys.push_back(ref_y_prev);
   }
   xs.push_back(ref_x); ys.push_back(ref_y);
 
+  auto cur_sd = getFrenet(ref_x, ref_y, ref_yaw, map_.x, map_.y);
+  double cur_d = cur_sd[1];
+
+  double d0, d1, d2;
+  d0 = d1 = d2 = d;
+
+//  if (fabs(cur_d - d) > 3) {
+//    d0 += (cur_d - d0) / 2;
+//  }
+
   // Now we will add some more points further away
-  auto next_wp0 = getXY(cxt.s + 30, d, map_.s, map_.x, map_.y);
-  auto next_wp1 = getXY(cxt.s + 60, d, map_.s, map_.x, map_.y);
-  auto next_wp2 = getXY(cxt.s + 90, d, map_.s, map_.x, map_.y);
+  auto next_wp0 = getXY(cur_sd[0] + 30, d0, map_.s, map_.x, map_.y);
+  auto next_wp1 = getXY(cur_sd[0] + 60, d1, map_.s, map_.x, map_.y);
+  auto next_wp2 = getXY(cur_sd[0] + 90, d2, map_.s, map_.x, map_.y);
   xs.push_back(next_wp0[0]); ys.push_back(next_wp0[1]);
   xs.push_back(next_wp1[0]); ys.push_back(next_wp1[1]);
   xs.push_back(next_wp2[0]); ys.push_back(next_wp2[1]);
@@ -1102,54 +1403,71 @@ void FSM::createXYFromSpline(double trg_v, double d,  Movement & m, Movement & p
   // The reference point is at (0,0) and the x axis points to our yaw angle.
   // This way we can use the spline as f(x), and it would still behave as a function (single value of y for x)
   for (int i = 0; i < xs.size(); ++i) {
-    double shift_x = xs[i] - ref_x;
-    double shift_y = ys[i] - ref_y;
-    xs[i] = (shift_x * cos(-ref_yaw) - shift_y * sin(-ref_yaw));
-    ys[i] = (shift_x * sin(-ref_yaw) + shift_y * cos(-ref_yaw));
+    auto car_xy = translateToCarCoords(xs[i], ys[i], ref_yaw, ref_x, ref_y);
+    xs[i] = car_xy[0];
+    ys[i] = car_xy[1];
   }
 
-  tk::spline spl;
-  spl.set_points(xs, ys);
+  tk::spline * spl = new tk::spline();
+  spl->set_points(xs, ys);
+  return spl;
+}
+
+/**
+ * Method to populate the future X,Y trajectory based on a Spline interpolation
+ * @param trg_v Traget speed
+ * @param d Current d Frenet value
+ */
+void FSM::createXYFromSpline(double trg_v, double d,  Movement & prev_m)
+{
+  // TODO: for now overriding to the previous trg_speed of the FSM
+  //trg_v = prev_trg_speed_;
+  if (DEBUG) std::cout << "Target speed for Spline: " << trg_v << std::endl;
+
+  size_t sz = next_x_vals_.size();
+
+  // Create a local spline for use with local car coords
+  double ref_x, ref_y, ref_yaw;
+  std::unique_ptr<tk::spline> spl(createLocalSpline(d, prev_m, ref_x, ref_y, ref_yaw));
 
   // How many point do I need to sample from the spline so that we still keep under our
   // velocity and acceleration constraints?
 //  auto trg_xy = getXY(td.final_s, td.final_d, map_.s, map_.x, map_.y);
   double trg_x = 30; //trg_xy[0];
-  double trg_y = spl(trg_x);
+  double trg_y = (*spl)(trg_x);
   double trg_dist = sqrt(pow(trg_x, 2) + pow(trg_y, 2));
   double N = trg_dist / (TIME_RES * trg_v);
-  double x_add_on = 0;
-  double prev_x_point = 0;
-  double prev_y_point = spl(prev_x_point);
+  double x_add_on = 0; // Always in car-local coords
+  double prev_x_point = prev_m.x; //0;
+  double prev_y_point = prev_m.y; //(*spl)(prev_x_point);
   double cur_yaw = ref_yaw;
   for (size_t t = sz; t < TRAJ_STEPS; ++t) {
     double x_point = x_add_on + trg_x / N;
-    double y_point = spl(x_point);
+    double y_point = (*spl)(x_point);
+    auto world_xy = translateToWorldCoords(x_point, y_point, ref_yaw, ref_x, ref_y);
     x_add_on = x_point;
-    double x_ref = x_point;
-    double y_ref = y_point;
-    // Re-translate to original world coordinates
-    x_point = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
-    y_point = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
+    x_point = world_xy[0];
+    y_point = world_xy[1];
 
-    x_point += ref_x;
-    y_point += ref_y;
+    Movement m = getLastPlannedMovement();
 
-    if (DEBUG) { std::cout << "Prev "; printMovement(prev_m); }
-    updateLimitMovement(m, prev_m, trg_v);
-    if (DEBUG) { std::cout << "Updated "; printMovement(m); }
+//    auto m = getLastPlannedMovement();
+//    if (DEBUG) { std::cout << "Prev "; printMovement(prev_m); }
+    if (DEBUG) { std::cout << "Attempt "; printMovement(m); }
+//    if (updateLimitMovement(m, prev_m, trg_v)) {
+//      if (DEBUG) { std::cout << "Updated "; printMovement(m); }
+//      //next_x_vals_.back() = x_point = m.x;
+//      //next_y_vals_.back() = y_point = m.y;
+//    }
 
     // Update cur_yaw
     cur_yaw = atan2(y_point - prev_y_point, x_point - prev_x_point);
     prev_x_point = x_point;
     prev_y_point = y_point;
 
-    prev_m = m;
-    m = getLastPlannedMovement();
-//    TrajNode tn; tn.x = x_point; tn.y = y_point; tn.s = 0; tn.d = 0;
+    // Populate the rest of the values
     next_x_vals_.push_back(x_point);
     next_y_vals_.push_back(y_point);
-    // Populate the rest of the values
     auto cur_sd = getFrenet(x_point, y_point, cur_yaw, map_.x, map_.y);
     next_s_vals_.push_back(cur_sd[0]);
     next_d_vals_.push_back(d);
@@ -1159,6 +1477,7 @@ void FSM::createXYFromSpline(double trg_v, double d,  Movement & m, Movement & p
       std::cout << "Added new trajectory step " << (t+1) << " with x: " << x_point << " y: " << y_point <<
           " keep_speed: 1" << std::endl;
     }
+    prev_m = m;
   }
 }
 
@@ -1166,7 +1485,7 @@ void FSM::createXYFromSpline(double trg_v, double d,  Movement & m, Movement & p
 //
 // Method to apply the pre-computed trajectory
 //
-void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, size_t cur_traj_idx)
+void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, size_t & cur_traj_idx)
 {
   double prev_ns   = p.s;
   double prev_d    = p.d;
@@ -1176,74 +1495,92 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
   double prev_speed = cur_speed;
 
   updateLane(prev_d);
-  static Movement prev_m = getLastPlannedMovement();
+  static Movement prev_m;
+  prev_m = getLastPlannedMovement();
 
   bool keep_speed = (cur_traj_idx >= forward_traj.size());
 
   size_t i = next_x_vals_.size();
 
   if (keep_speed) {
-    auto m = getLastPlannedMovement();
-    createXYFromSpline(cur_speed, prev_d, m, prev_m);
+//    auto m = getLastPlannedMovement();
+    createXYFromSpline(prev_trg_speed_, prev_d, prev_m);
     return;
   }
 
-  if (DEBUG) printPositionData("ApplyTrajectory", p);
+  if (DEBUG) {
+    printPositionData("ApplyTrajectory", p);
+    std::cout << "cur_traj_idx: " << cur_traj_idx << " out of " << forward_traj.size() << std::endl;
+  }
 
   double time = 0;
   // Build the rest of the steps
 
   for (; i < TRAJ_STEPS; ++i) {
-    auto m = getLastPlannedMovement();
-    if (DEBUG) printMovement(m);
     // If we completed our computed trajectory, just change policy to keep current speed
-    if (!keep_speed and cur_traj_idx + i >= forward_traj.size()) {
+    if (!keep_speed and cur_traj_idx >= forward_traj.size()) {
       //TrajData td = initTrajData(i, prev_ns, prev_speed, prev_d);
       //spd = getShortSplines(td);
       keep_speed = true;
       time = 0;
       if (DEBUG) std::cout << "Finished generated trajectory. Now keeping speed (TrajSize: " << forward_traj.size() << ")\n";
+      createXYFromSpline(prev_trg_speed_, prev_d, prev_m);
+      return;
     }
     time += TIME_RES;
     double nx, ny, ns, nd;
     if (keep_speed) {
-      if (DEBUG) std::cout << "CurYaw: " << m.yaw << " cos: " << cos(m.yaw) << " sin: " << sin(m.yaw) <<std::endl;
-      //double prev_vx = prev_speed * cos(yaw);
-      //double prev_vy = prev_speed * sin(yaw);
-      //double s_step = sqrt(pow(prev_vx * TIME_RES, 2) + pow(prev_vy * TIME_RES, 2));
-      auto prev_xy = getXY(prev_ns, prev_d, map_.s, map_.x, map_.y);
-      if (DEBUG) { std::cout << "Prev "; printMovement(prev_m); }
-      updateLimitMovement(m, prev_m, cur_speed);
-      if (DEBUG) { std::cout << "Updated "; printMovement(m); }
-      //nx = prev_xy[0] + m.vx * TIME_RES;
-      //ny = prev_xy[1] + m.vy * TIME_RES;
-      nx = next_x_vals_.back() + m.vx * TIME_RES;
-      ny = next_y_vals_.back() + m.vy * TIME_RES;
-      //double s_step = fmax(prev_speed * cos(yaw), prev_speed * sin(yaw)) * TIME_RES;
-      //ns = prev_ns + s_step;//prev_speed * TIME_RES;
-      auto next_sd = getFrenet(nx, ny, m.yaw, map_.x, map_.y);
-      ns = next_sd[0];
-      nd = next_sd[1];
-      //ns = fmod(ns, MAX_S);
+//      if (DEBUG) std::cout << "PrevYaw: " << prev_m.yaw << " cos: " << cos(prev_m.yaw) << " sin: " << sin(prev_m.yaw) <<std::endl;
+//      //double prev_vx = prev_speed * cos(yaw);
+//      //double prev_vy = prev_speed * sin(yaw);
+//      //double s_step = sqrt(pow(prev_vx * TIME_RES, 2) + pow(prev_vy * TIME_RES, 2));
+//      auto prev_xy = getXY(prev_ns, prev_d, map_.s, map_.x, map_.y);
+//
+//      //nx = prev_xy[0] + m.vx * TIME_RES;
+//      //ny = prev_xy[1] + m.vy * TIME_RES;
+//      nx = next_x_vals_.back() + prev_m.vx * TIME_RES;
+//      ny = next_y_vals_.back() + prev_m.vy * TIME_RES;
+//      //double s_step = fmax(prev_speed * cos(yaw), prev_speed * sin(yaw)) * TIME_RES;
+//      //ns = prev_ns + s_step;//prev_speed * TIME_RES;
+//      auto next_sd = getFrenet(nx, ny, prev_m.yaw, map_.x, map_.y);
+//      ns = next_sd[0];
 //      nd = prev_d;
-//      auto vecXY = getXYfromSpline(ns, nd);
-//      nx = vecXY[0];
-//      ny = vecXY[1];
+//      //ns = fmod(ns, MAX_S);
+////      nd = prev_d;
+////      auto vecXY = getXYfromSpline(ns, nd);
+////      nx = vecXY[0];
+////      ny = vecXY[1];
     } else {
-      nx = forward_traj[cur_traj_idx + i].x;
-      ny = forward_traj[cur_traj_idx + i].y;
-      ns = forward_traj[cur_traj_idx + i].s;
-      nd = forward_traj[cur_traj_idx + i].d;
+      nx = forward_traj[cur_traj_idx].x;
+      ny = forward_traj[cur_traj_idx].y;
+      ns = forward_traj[cur_traj_idx].s;
+      nd = forward_traj[cur_traj_idx].d;
     }
+    ++cur_traj_idx;
+    next_x_vals_.push_back(nx);
+    next_y_vals_.push_back(ny);
+//    auto m = getLastPlannedMovement();
+//    if (DEBUG) { std::cout << "Prev "; printMovement(prev_m); }
+//    if (DEBUG) { std::cout << "Attempted "; printMovement(m); }
+//    if (updateLimitMovement(m, prev_m, prev_trg_speed_)) {
+//      if (DEBUG) { std::cout << "Updated "; printMovement(m); }
+//      next_x_vals_.back() = nx = m.x;
+//      next_y_vals_.back() = ny = m.y;
+//      double cur_yaw = atan2(m.y - prev_m.y, m.x - prev_m.x);
+//      auto cur_sd = getFrenet(m.x, m.y, cur_yaw, map_.x, map_.y);
+//      ns = cur_sd[0];
+//    }
+    next_s_vals_.push_back(ns);
+    next_d_vals_.push_back(nd);
+
+    prev_m     = getLastPlannedMovement();//m;
+
     if (DEBUG) {
       std::cout << "Added new trajectory step " << (i+1) << " with x: " << nx << " y: " << ny << " s: " <<
           ns << " d: " << nd << " speed: " << cur_speed << " acc: " << cur_acc << " keep_speed: " <<
-          keep_speed << std::endl;
+          keep_speed << std::endl << std::endl;
     }
-    next_x_vals_.push_back(nx);
-    next_y_vals_.push_back(ny);
-    next_s_vals_.push_back(ns);
-    next_d_vals_.push_back(nd);
+
     // Keep track of speed and acceleration
     if (ns < prev_ns) ns += MAX_S; // Wraparound case
     cur_speed  = (ns - prev_ns) / TIME_RES;
@@ -1255,7 +1592,6 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
     prev_speed = cur_speed;
     prev_acc_.push_back(cur_acc);
     prev_speed_.push_back(cur_speed);
-    prev_m     = m;
   }
 }
 
@@ -1327,6 +1663,7 @@ void FSM::handleFirstTime()
 {
   assert(state_ == nullptr);
   state_ = new MatchSpeed(*this, MAX_SPEED * MAX_SPEED_MAR, nullptr);
+  prev_pol_ = MATCH_SPEED;
   first_time_ = false;
 }
 
@@ -1339,7 +1676,6 @@ void FSM::update(Context & cxt)
   if (first_time_) {
     if (DEBUG) std::cout << "Running for the first time\n";
     handleFirstTime();
-    prev_pol_ = MATCH_SPEED;
     return;
   }
 
@@ -1355,8 +1691,12 @@ void FSM::update(Context & cxt)
   if (DEBUG) {
     static int stepCnt = 0;
     std::cout << "================================================================================\n";
+    std::cout << "[Step " << stepCnt << "] Current given state  (s,d,x,y,yaw,v): (" <<
+        cxt_->s << ", " << cxt_->d << ", " << cxt_->x << ", " << cxt_->y << ", " << deg2rad(cxt_->yaw) <<
+        ", " << cxt_->speed * MPH2MPS << ")\n";
     std::cout << "[Step " << stepCnt << "] Current internal state  (s,d,x,y,yaw,v,a): (" <<
-        p.s << ", " << p.d << ", " << p.x << ", " << p.y << ", " << deg2rad(cxt_->yaw) << ", " << p.v << ", " << p.a << ")\n";
+        p.s << ", " << p.d << ", " << p.x << ", " << p.y << ", " << deg2rad(cxt_->yaw) << ", " << p.v <<
+        ", " << p.a << ")\n";
     std::cout << "State target speed: : " << state_->getTargetSpeed() << std::endl;
     stepCnt += (TRAJ_STEPS - sz);
     std::cout << "FSM update. Server processed " << (TRAJ_STEPS - sz) << " points" << std::endl;
@@ -1376,7 +1716,7 @@ void FSM::update(Context & cxt)
       prev_pol_ = pol;
       return;
     // Otherwise, check if our speed target has changed
-    } else if (state_->getTargetSpeed() - sd.v > 0 or state_->getTargetSpeed() - sd.v < -0.1) {
+    } else if (state_->getTargetSpeed() - sd.v > 0.1 or state_->getTargetSpeed() - sd.v < -0.1) {
       pol = MATCH_SPEED;
       delete state_;
       state_ = new MatchSpeed(*this, sd.v, &sd);
