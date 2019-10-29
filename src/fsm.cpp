@@ -270,42 +270,66 @@ void State::matchTargetSpeed(double d, double trg_v)
 
 
   // How many timesteps do we need at least to shed our initial acceleration?
-  int shed_acc_steps      = ceil((fabs(tot_a) / MAX_JERK) / TIME_RES);
   double delta_speed_shed = 0;
-  double a_shed           = 0;
-  double a_jerk           = (tot_a > 0)? -MAX_JERK: MAX_JERK;
-  // How much speed are we going to add while shedding initial acceleration?
-  for (int i = 0; i < shed_acc_steps; ++i) {
-    a_shed               += a_jerk * TIME_RES;
-    delta_speed_shed     += a_shed * TIME_RES;
+  // TODO: testing without shedding initial acc
+  if (false) {
+    int shed_acc_steps      = ceil((fabs(tot_a) / MAX_JERK) / TIME_RES);
+    double a_shed           = 0;
+    double a_jerk           = (tot_a > 0)? -MAX_JERK: MAX_JERK;
+    // How much speed are we going to add while shedding initial acceleration?
+    for (int i = 0; i < shed_acc_steps; ++i) {
+      a_shed               += a_jerk * TIME_RES;
+      delta_speed_shed     += a_shed * TIME_RES;
+    }
   }
+
   const bool accel = delta_v + delta_speed_shed >= 0;
 
-  if (DEBUG) std::cout << "MatchTargetSpeed: initial acc: " << tot_a << ". Need to shed for dv: " <<
-      delta_speed_shed << std::endl;
+  if (DEBUG) std::cout << "MatchTargetSpeed: initial speed: " << tot_v << " initial acc: " << tot_a <<
+      ". Need to shed for dv: " << delta_speed_shed << std::endl;
 
   // The flip point: speed at which to switch from accelerating to decelerating or vice versa
   double flip_point = tot_v + (delta_v + delta_speed_shed) / 2;
   if (DEBUG) std::cout << "MatchTargetSpeed: initial flip_point " << flip_point << std::endl;
 
+  // How much do we need to shed to go from max_acc to the initial_one?
+  double delta_speed_shed_to_init = 0;
+  {
+    int shed_acc_steps = ceil(((MAX_ACC - tot_a) / MAX_JERK) / TIME_RES);
+    double a_shed = 0;
+    for (int i = 0; i < shed_acc_steps; ++i) {
+      delta_speed_shed_to_init += a_shed * TIME_RES;
+      a_shed += MAX_JERK * TIME_RES;
+    }
+  }
+
   //double T = 0;
   double cur_x = prev_m.x;
   double cur_y = prev_m.y;
   double cur_speed = tot_v;
+  double prev_speed = cur_speed;
   double cur_acc = tot_a;
   double cur_yaw = prev_m.yaw;
   double prev_x = cur_x;
   double prev_y = cur_y;
   if (DEBUG) std::cout << "MatchTargetSpeed: " << (accel? "accelerating": "decelerating") << std::endl;
 
-  while (!isZero(trg_v - cur_speed)) {
+  while (accel? trg_v - cur_speed > 0: cur_speed - trg_v > 0) {
     //T           += TIME_RES;
     cur_x       += vx * TIME_RES;
     cur_y       += vy * TIME_RES;
     vx          += ax * TIME_RES;
     vy          += ay * TIME_RES;
     cur_speed   = sqrt(pow(vx, 2) + pow(vy, 2));
+
     bool flipped = (accel)? cur_speed > flip_point: cur_speed < flip_point;
+
+    // Break condition, if we came close to our target
+    if (flipped and (accel? cur_speed < prev_speed: prev_speed < cur_speed)) {
+      if (DEBUG) std::cout << "MatchTargetSpeed: cur_speed inversion at " << cur_speed << "\n";
+      break;
+    }
+
     double jerk  = (accel)? MAX_JERK: -MAX_JERK;
     jerk         = (flipped)? -jerk: jerk;
     double jx    = jerk * cos(cur_yaw);
@@ -320,7 +344,7 @@ void State::matchTargetSpeed(double d, double trg_v)
       ax = cur_acc * cos(cur_yaw);
       ay = cur_acc * sin(cur_yaw);
       // Update flip point as well
-      flip_point = trg_v + (accel? -1: 1) * fsm_.delta_speed_to_zero_acc_;
+      flip_point = trg_v + (accel? -1: 1) * delta_speed_shed_to_init; //fsm_.delta_speed_to_zero_acc_;
       if (DEBUG) std::cout << "MatchTargetSpeed: updated flip_point " << flip_point << std::endl;
     } else {
       ax = n_ax;
@@ -344,8 +368,8 @@ void State::matchTargetSpeed(double d, double trg_v)
           " y: " << cur_y << " vx: " << vx << " vy: " << vy << " ax: " << ax << " ay: " << ay <<
           " flipped: " << flipped << std::endl;
     }
-
-    if (flipped and isZero(cur_acc)) break;
+    //if (flipped and isZero(cur_acc)) break;
+    prev_speed = cur_speed;
   }
   if (DEBUG) std::cout << "MatchTargetSpeed: computed trajectory of " << forward_traj_.size() << " steps\n";
 
@@ -1420,7 +1444,7 @@ tk::spline * FSM::createLocalSpline(double d, const Movement & prev_m,
  * @param trg_v Traget speed
  * @param d Current d Frenet value
  */
-void FSM::createXYFromSpline(double trg_v, double d,  Movement & prev_m)
+void FSM::createXYFromSpline(double trg_v, double d,  Movement & prev_m, vector<TrajNode> & ft, size_t & cti)
 {
   // TODO: for now overriding to the previous trg_speed of the FSM
   //trg_v = prev_trg_speed_;
@@ -1444,7 +1468,13 @@ void FSM::createXYFromSpline(double trg_v, double d,  Movement & prev_m)
   double prev_y_point = prev_m.y; //(*spl)(prev_x_point);
   double cur_yaw = ref_yaw;
   for (size_t t = sz; t < TRAJ_STEPS; ++t) {
-    double x_point = x_add_on + trg_x / N;
+    double x_point = x_add_on +  trg_x / N;
+    // Translate forward trajectory to car local coords, if present
+    if (cti < ft.size()) {
+      TrajNode & tn = ft[cti++];
+      auto car_xy = translateToCarCoords(tn.x, tn.y, ref_yaw, ref_x, ref_y);
+      x_point = car_xy[0];
+    }
     double y_point = (*spl)(x_point);
     auto world_xy = translateToWorldCoords(x_point, y_point, ref_yaw, ref_x, ref_y);
     x_add_on = x_point;
@@ -1504,9 +1534,9 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
 
   size_t i = next_x_vals_.size();
 
-  if (keep_speed) {
+  if (true or keep_speed) {
 //    auto m = getLastPlannedMovement();
-    createXYFromSpline(prev_trg_speed_, prev_d, prev_m);
+    createXYFromSpline(prev_trg_speed_, prev_d, prev_m, forward_traj, cur_traj_idx);
     return;
   }
 
@@ -1526,7 +1556,7 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
       keep_speed = true;
       time = 0;
       if (DEBUG) std::cout << "Finished generated trajectory. Now keeping speed (TrajSize: " << forward_traj.size() << ")\n";
-      createXYFromSpline(prev_trg_speed_, prev_d, prev_m);
+      createXYFromSpline(prev_trg_speed_, prev_d, prev_m, forward_traj, cur_traj_idx);
       return;
     }
     time += TIME_RES;
@@ -1606,6 +1636,11 @@ void FSM::clearProcessed()
   int processed = TRAJ_STEPS - cxt_->path_x.size();
   assert(processed > 0 and processed <= TRAJ_STEPS);
 
+  if (DEBUG) {
+    for (int i = 0; i < processed; ++i) {
+      std::cout << (i+1) << " Processed x: " << next_x_vals_[i] << " y: " << next_y_vals_[i] << std::endl;
+    }
+  }
   next_x_vals_.erase(next_x_vals_.begin(), next_x_vals_.begin() + processed);
   next_y_vals_.erase(next_y_vals_.begin(), next_y_vals_.begin() + processed);
   next_s_vals_.erase(next_s_vals_.begin(), next_s_vals_.begin() + processed);

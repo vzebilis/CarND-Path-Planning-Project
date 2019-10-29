@@ -183,7 +183,7 @@ public:
   void generateFullSplines();
   void matchCarSpeed(double init_s, double init_d, double final_s, double final_d, double final_v);
   tk::spline * createLocalSpline(double d, const Movement & prev_m, double & ref_x, double & ref_y, double & ref_yaw);
-  void createXYFromSpline(double trg_v, double d, Movement & prev_m);
+  void createXYFromSpline(double trg_v, double d, Movement & prev_m, std::vector<TrajNode> & ft, size_t & cti);
   void computeNextXY(double start_x, double step_x, tk::spline & spl,
       double ref_yaw, double ref_x, double ref_y);
   SplineData * getShortSplines(TrajData & td);
