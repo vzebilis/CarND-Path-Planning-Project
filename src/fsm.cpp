@@ -298,7 +298,7 @@ void State::matchTargetSpeed(double d, double trg_v)
   double prev_y = cur_y;
   if (DEBUG) std::cout << "MatchTargetSpeed: " << (accel? "accelerating": "decelerating") << std::endl;
 
-  while (((accel)? trg_v > cur_speed: cur_speed > trg_v)) {
+  while (!isZero(trg_v - cur_speed)) {
     //T           += TIME_RES;
     cur_x       += vx * TIME_RES;
     cur_y       += vy * TIME_RES;
@@ -306,7 +306,6 @@ void State::matchTargetSpeed(double d, double trg_v)
     vy          += ay * TIME_RES;
     cur_speed   = sqrt(pow(vx, 2) + pow(vy, 2));
     bool flipped = (accel)? cur_speed > flip_point: cur_speed < flip_point;
-    if (flipped and DEBUG) std::cout << "FLIPPED!" << std::end;
     double jerk  = (accel)? MAX_JERK: -MAX_JERK;
     jerk         = (flipped)? -jerk: jerk;
     double jx    = jerk * cos(cur_yaw);
@@ -316,8 +315,10 @@ void State::matchTargetSpeed(double d, double trg_v)
     cur_acc      = sqrt(pow(n_ax, 2) + pow(n_ay, 2));
     if (fabs(cur_acc) >= MAX_ACC) {
       cur_acc = (cur_acc > 0)? MAX_ACC: -MAX_ACC;
-      ax = ((ax > 0)? 1: -1) * cur_acc * cos(cur_yaw);
-      ay = ((ay > 0)? 1: -1) * cur_acc * sin(cur_yaw);
+      //ax = ((ax > 0)? 1: -1) * cur_acc * cos(cur_yaw);
+      //ay = ((ay > 0)? 1: -1) * cur_acc * sin(cur_yaw);
+      ax = cur_acc * cos(cur_yaw);
+      ay = cur_acc * sin(cur_yaw);
       // Update flip point as well
       flip_point = trg_v + (accel? -1: 1) * fsm_.delta_speed_to_zero_acc_;
       if (DEBUG) std::cout << "MatchTargetSpeed: updated flip_point " << flip_point << std::endl;
@@ -340,7 +341,8 @@ void State::matchTargetSpeed(double d, double trg_v)
 
     if (DEBUG) {
       std::cout << "Cur speed: " << cur_speed << " Cur acc: " << cur_acc << " Cur x: " << cur_x <<
-          " y: " << cur_y << " vx: " << vx << " vy: " << vy << " ax: " << ax << " ay: " << ay << std::endl;
+          " y: " << cur_y << " vx: " << vx << " vy: " << vy << " ax: " << ax << " ay: " << ay <<
+          " flipped: " << flipped << std::endl;
     }
 
     if (flipped and isZero(cur_acc)) break;
