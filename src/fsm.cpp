@@ -350,7 +350,7 @@ void State::matchTargetSpeed(double d, double trg_v)
       ax = n_ax;
       ay = n_ay;
     }
-    if (!accel) cur_acc = -cur_acc;
+//    if (!accel) cur_acc = -cur_acc;
     cur_yaw = atan2(cur_y - prev_y, cur_x - prev_x);
     prev_x = cur_x;
     prev_y = cur_y;
@@ -843,6 +843,21 @@ static std::string printLane(Lane lane)
   return "";
 }
 
+static std::string printPolicy(Policy pol)
+{
+  switch (pol) {
+  case KEEP_LANE:
+    return "KEEP_LANE";
+  case CHANGE_LANE:
+    return "CHANGE_LANE";
+  case MATCH_SPEED:
+    return "MATCH_SPEED";
+  default:
+    assert(false);
+  }
+  return "";
+}
+
 //
 // Function to check which of the available lanes is best to use
 //
@@ -864,7 +879,7 @@ SensorData FSM::checkLanes(const PositionData & p)
   // DEBUG DEBUG DEBUG DEBUG
   // DEBUG DEBUG DEBUG DEBUG
   // TODO: for now skip changing lanes
-  return best;
+  //return best;
 
   if (DEBUG and best.s != -1)
       std::cout << "Car in the same lane: " << best.id << " s: " << best.s << " d: " << best.d << " v: " << best.v << std::endl;
@@ -913,7 +928,11 @@ SensorData FSM::checkLanes(const PositionData & p)
     }
   }
 
-  if (DEBUG) std::cout << "Applying policy: " << best.pol << std::endl;
+  if (DEBUG) {
+    std::cout << "Applying policy: " << printPolicy(best.pol) << std::endl;
+    std::cout << "  Target lane with d: " << best.d << std::endl;
+  }
+
   return best;
 }
 
@@ -934,17 +953,228 @@ void FSM::updateLane(double d)
 ChangeLane::ChangeLane(FSM & fsm, double trg_speed, SensorData * sd) : State(fsm, trg_speed)
 {
   if (DEBUG) std::cout << "ChangeLane: creating new State\n";
+  fsm_.prev_pol_ = CHANGE_LANE;
   //p_ = fsm_.getLastProcessed();
   //fsm_.clearAll();
   p_ = fsm_.getMostRecentNotProcessed();
   fsm_.clearProcessed();
-  //TrajData td = computeTargetPos(p_, sd);
+//  size_t prev_sz = fsm_.next_x_vals_.size();
+//  TrajData td = computeTargetPos(p_, sd);
+//  computeChange(p_, sd);
   fsm_.prev_trg_speed_ = trg_speed_;
   // TODO: hack!
   p_.d = sd->d;
   //computeTrajectory(td); // Base class method
   // Apply the new trajectory by creating the new next_x_vals and next_y_vals
+//  Movement m = fsm_.getLastPlannedMovement();
+//  fsm_.createXYFromSpline(trg_speed_, sd->d, m, forward_traj_, cur_traj_idx_);
+//  // Move next_x/y_vals to forward trajectory
+//  for (size_t i = prev_sz; i < fsm_.next_x_vals_.size(); ++i) {
+//    forward_traj_.emplace_back();
+//    TrajNode & tn = forward_traj_.back();
+//    tn.x = fsm_.next_x_vals_[i];
+//    tn.y = fsm_.next_y_vals_[i];
+//    tn.s = 0;
+//    tn.d = 0;
+//  }
+//  fsm_.next_x_vals_.erase(fsm_.next_x_vals_.begin() + prev_sz, fsm_.next_x_vals_.end());
+//  fsm_.next_y_vals_.erase(fsm_.next_y_vals_.begin() + prev_sz, fsm_.next_y_vals_.end());
+//  fsm_.next_s_vals_.erase(fsm_.next_s_vals_.begin() + prev_sz, fsm_.next_s_vals_.end());
+//  fsm_.next_d_vals_.erase(fsm_.next_d_vals_.begin() + prev_sz, fsm_.next_d_vals_.end());
+//  fsm_.prev_speed_.erase(fsm_.prev_speed_.begin() + prev_sz, fsm_.prev_speed_.end());
+//  fsm_.prev_acc_.erase(fsm_.prev_acc_.begin() + prev_sz, fsm_.prev_acc_.end());
   fsm_.applyTrajectory(p_, forward_traj_, cur_traj_idx_);
+}
+
+
+static double getDistToShedAcc(double cur_a, double tot_a, double cur_v)
+{
+  if (cur_a <= tot_a) return 0;
+  double delta_dist_shed_to_init_acc = 0;
+  {
+    int shed_acc_steps = ceil(((cur_a - tot_a) / MAX_JERK) / TIME_RES) + 1;
+    double a_shed = cur_a;
+    double v_shed = cur_v;
+    for (int i = 0; i < shed_acc_steps; ++i) {
+      v_shed -= a_shed * TIME_RES;
+      a_shed -= MAX_JERK * TIME_RES;
+      delta_dist_shed_to_init_acc += v_shed * TIME_RES;
+    }
+  }
+  if (DEBUG) std::cout << "Distance to shed: " << delta_dist_shed_to_init_acc << " in order to get from acc " << cur_a <<
+      " to tot_a " << tot_a << " with current speed " << cur_v << std::endl;
+  return delta_dist_shed_to_init_acc;
+}
+
+//
+// Compute target position, for a lane change
+//
+void ChangeLane::computeChange(PositionData & p, SensorData * sd)
+{
+  forward_traj_.clear();
+  cur_traj_idx_ = 0;
+  Movement m = fsm_.getLastPlannedMovement();
+  double tot_a = sqrt(pow(m.ax, 2) + pow(m.ay, 2));
+  double tot_v = sqrt(pow(m.vx, 2) + pow(m.vy, 2));
+
+  // How much do we need to shed to go from max_acc to the initial_one?
+//  double delta_dist_shed_to_init_acc = 0;
+//  {
+//    int shed_acc_steps = ceil(((MAX_ACC - tot_a) / MAX_JERK) / TIME_RES);
+//    double a_shed = MAX_ACC;
+//    double v_shed = tot_v;
+//    for (int i = 0; i < shed_acc_steps; ++i) {
+//      v_shed -= a_shed * TIME_RES;
+//      a_shed -= MAX_JERK * TIME_RES;
+//      delta_dist_shed_to_init_acc += v_shed * TIME_RES;
+//    }
+//  }
+
+  // Try to do the change in about 2 seconds
+  double cur_yaw = m.yaw;
+  double cur_x   = m.x;
+  double cur_y   = m.y;
+  double vx      = m.vx;
+  double vy      = m.vy;
+  double ax      = m.ax;
+  double ay      = m.ay;
+  double prev_x  = cur_x;
+  double prev_y  = cur_y;
+
+  auto cur_sd    = getFrenet(cur_x, cur_y, cur_yaw, fsm_.map_.x, fsm_.map_.y);
+  auto init_sd   = cur_sd;
+  double trg_s   = cur_sd[0] + tot_v * LANE_CHANGE_FCT / p.v;
+  auto trg_xy    = getXY(trg_s, sd->d, fsm_.map_.s, fsm_.map_.x, fsm_.map_.y);
+  bool accel     = sd->d - cur_sd[1] > 0;
+
+  // TODO: THIS IS NOT CORRECT. Needs to be set on speed probably
+  // I need to keep track how much distance I will cross to shed current acceleration
+  // I should then start to decelerate once I am that much distance from the goal
+//  double flip_point = (sd->d + cur_sd[1]) / 2;
+  if (trg_s < cur_sd[0]) trg_s += MAX_S; // wraparound
+  double flip_point  = (trg_s + cur_sd[0]) / 2  - 1;
+
+  double cur_speed, prev_speed;
+  cur_speed = prev_speed = tot_v;
+
+  if (DEBUG) std::cout << "ChangeLane: flip_point for s: " << flip_point << std::endl;
+  if (DEBUG) std::cout << "ChangeLane: initial speed: " << cur_speed << " initial acc: " << tot_a <<
+      ". Target s: " << trg_s << " Target d: " << sd->d << std::endl;
+
+  size_t num_steps = 0;
+  bool flipped = false;
+  // Iterate until we reach the desired d
+  while (accel? cur_sd[1] < sd->d: cur_sd[1] > sd->d) {
+    cur_x     += vx * TIME_RES;
+    cur_y     += vy * TIME_RES;
+    vx        += ax * TIME_RES;
+    vy        += ay * TIME_RES;
+    cur_speed  = sqrt(pow(vx, 2) + pow(vy, 2));
+
+//    if (cur_speed > tot_v) {
+//      if (DEBUG) std::cout << "Limiting speed to: " << tot_v << std::endl;
+//      cur_speed     = tot_v;
+//      double new_vx = cur_speed * cos(cur_yaw);
+//      double new_vy = cur_speed * sin(cur_yaw);
+//      ax = (ax > 0? 1: -1) * fabs(new_vx - vx) / TIME_RES;
+//      ay = (ay > 0? 1: -1) * fabs(new_vy - vy) / TIME_RES;
+//      vx = new_vx;
+//      vy = new_vy;
+//    }
+
+//    double cur_acc = sqrt(pow(ax, 2) + pow(ay, 2));
+//    if (cur_acc > MAX_ACC) {
+//      if (DEBUG) std::cout << "Limiting acceleration to: " << MAX_ACC << std::endl;
+//      cur_acc = MAX_ACC;
+//      //ax = ((ax > 0)? 1: -1) * cur_acc * cos(cur_yaw);
+//      //ay = ((ay > 0)? 1: -1) * cur_acc * sin(cur_yaw);
+//      double new_ax = cur_acc * cos(cur_yaw);// - (accel? 1: -1) * pi()/2);
+//      double new_ay = cur_acc * sin(cur_yaw);// - (accel? 1: -1) * pi()/2);
+//      vx -= (new_ax - ax) / TIME_RES;
+//      vy -= (new_ay - ay) / TIME_RES;
+//      ax = new_ax;
+//      ay = new_ay;
+//    }
+//    bool flipped = (accel)? cur_sd[1] > flip_point: cur_sd[1] < flip_point;
+
+    // Break condition, if we came close to our target
+//    if (flipped and (accel? cur_speed < prev_speed: prev_speed < cur_speed)) {
+//      if (DEBUG) std::cout << "ChangeLane: cur_d inversion at " << cur_speed << "\n";
+//      break;
+//    }
+    double jerk    = MAX_JERK * 0.5;//: -MAX_JERK;
+    jerk           = (flipped)? -jerk: jerk;
+    double jx      = jerk * cos(cur_yaw - (accel? 1: -1) * pi()/2); // perpendicular heading
+    double jy      = jerk * sin(cur_yaw - (accel? 1: -1) * pi()/2);
+//    double new_ax  = ax + jx * TIME_RES;
+//    double new_ay  = ay + jy * TIME_RES;
+    ax            += jx * TIME_RES;
+    ay            += jy * TIME_RES;
+    double cur_acc = sqrt(pow(ax, 2) + pow(ay, 2));
+//    double cur_acc = sqrt(pow(new_ax, 2) + pow(new_ay, 2));
+    // How much distance do I need to shed this acceleration?
+    if (cur_acc > MAX_ACC) {
+      if (DEBUG) std::cout << "Limiting acceleration to: " << MAX_ACC << std::endl;
+      cur_acc = MAX_ACC;
+      //ax = ((ax > 0)? 1: -1) * cur_acc * cos(cur_yaw);
+      //ay = ((ay > 0)? 1: -1) * cur_acc * sin(cur_yaw);
+      ax = cur_acc * cos(cur_yaw);// - (accel? 1: -1) * pi()/2);
+      ay = cur_acc * sin(cur_yaw);// - (accel? 1: -1) * pi()/2);
+      // Update flip point as well
+      //flip_point = sd->d + (accel? -1: 1) * delta_dist_shed_to_init_acc;
+      //if (DEBUG) std::cout << "ChangeLane: updated flip_point " << flip_point << std::endl;
+    }
+//    else {
+//      ax = new_ax;
+//      ay = new_ay;
+//    }
+
+
+
+    //    if (!accel) cur_acc = -cur_acc;
+    cur_yaw = atan2(cur_y - prev_y, cur_x - prev_x);
+    prev_x = cur_x;
+    prev_y = cur_y;
+
+    forward_traj_.emplace_back();
+    TrajNode & tn = forward_traj_.back();
+    tn.x = cur_x;
+    tn.y = cur_y;
+    cur_sd = getFrenet(cur_x, cur_y, cur_yaw, fsm_.map_.x, fsm_.map_.y);
+    tn.s = cur_sd[0];
+    tn.d = cur_sd[1];
+
+    if (DEBUG) {
+      std::cout << "Cur d: " << cur_sd[1] << "Cur s: " << cur_sd[0] << " Cur yaw: " << cur_yaw << " Cur speed: " << cur_speed << " Cur acc: " << cur_acc << " Cur x: " << cur_x <<
+          " y: " << cur_y << " vx: " << vx << " vy: " << vy << " ax: " << ax << " ay: " << ay <<
+          " flipped: " << flipped << std::endl;
+    }
+    //if (flipped and isZero(cur_acc)) break;
+    prev_speed = cur_speed;
+    ++num_steps;
+
+//    double d_to_trg = sqrt(pow(cur_x - trg_xy[0], 2) + pow(cur_y - trg_xy[1], 2));
+//    double s_shed = getDistToShedAcc(cur_acc, tot_a, cur_speed);
+//    if (s_shed >= fabs(trg_s - cur_sd[0])) flipped = true;
+    if (cur_sd[0] >= flip_point) flipped = true;
+  }
+
+//  int num_steps = ceil(2 / TIME_RES);
+//  double step_d  = (sd->d - cur_d) / num_steps;
+//  for (int i = 0; i < num_steps; ++i) {
+//    cur_s += tot_v * TIME_RES;
+//    cur_d += step_d;
+//    auto trg_xy = getXY(cur_s, cur_d, fsm_.map_.s, fsm_.map_.x, fsm_.map_.y);
+//    forward_traj_.emplace_back();
+//    TrajNode & tn = forward_traj_.back();
+//    tn.x = trg_xy[0];
+//    tn.y = trg_xy[1];
+//    tn.s = cur_s;
+//    tn.d = cur_d;
+//  }
+
+  if (DEBUG) std::cout << "Changing lanes from d: " << init_sd[1] << " to d: " << sd->d << " in " << num_steps <<
+          " steps and s: " << (cur_sd[0] - init_sd[0]) << std::endl;
 }
 
 //
@@ -988,7 +1218,7 @@ void ChangeLane::update()
 //
 Policy ChangeLane::nextPolicy()
 {
-  if (cur_traj_idx_ >= forward_traj_.size()) {
+  if (cur_traj_idx_ >= forward_traj_.size() + 2 * TRAJ_STEPS) {
     if (DEBUG) std::cout << "ChangeLane: next policy is KEEP_LANE\n";
     return KEEP_LANE;
   }
@@ -1014,6 +1244,7 @@ void KeepLane::update()
 MatchSpeed::MatchSpeed(FSM & fsm, double trg_speed, SensorData * sd) : State(fsm, trg_speed)
 {
   if (DEBUG) std::cout << "MatchSpeed: creating new State\n";
+  fsm_.prev_pol_ = MATCH_SPEED;
   //p_ = fsm_.getLastProcessed();
   //fsm_.clearAll();
   p_ = fsm_.getMostRecentNotProcessed();
@@ -1410,20 +1641,22 @@ tk::spline * FSM::createLocalSpline(double d, const Movement & prev_m,
   auto cur_sd = getFrenet(ref_x, ref_y, ref_yaw, map_.x, map_.y);
   double cur_d = cur_sd[1];
 
-  double d0, d1, d2;
-  d0 = d1 = d2 = d;
+  double d0, d1, d2, d3;
+  d0 = d1 = d2 = d3 = d;
 
 //  if (fabs(cur_d - d) > 3) {
 //    d0 += (cur_d - d0) / 2;
 //  }
 
   // Now we will add some more points further away
-  auto next_wp0 = getXY(cur_sd[0] + 30, d0, map_.s, map_.x, map_.y);
-  auto next_wp1 = getXY(cur_sd[0] + 60, d1, map_.s, map_.x, map_.y);
-  auto next_wp2 = getXY(cur_sd[0] + 90, d2, map_.s, map_.x, map_.y);
-  xs.push_back(next_wp0[0]); ys.push_back(next_wp0[1]);
+//  auto next_wp0 = getXY(cur_sd[0] + 15, d0, map_.s, map_.x, map_.y);
+  auto next_wp1 = getXY(cur_sd[0] + 30, d1, map_.s, map_.x, map_.y);
+  auto next_wp2 = getXY(cur_sd[0] + 60, d2, map_.s, map_.x, map_.y);
+  auto next_wp3 = getXY(cur_sd[0] + 90, d3, map_.s, map_.x, map_.y);
+//  xs.push_back(next_wp0[0]); ys.push_back(next_wp0[1]);
   xs.push_back(next_wp1[0]); ys.push_back(next_wp1[1]);
   xs.push_back(next_wp2[0]); ys.push_back(next_wp2[1]);
+  xs.push_back(next_wp3[0]); ys.push_back(next_wp3[1]);
 
   // Now we need to transform these points to the car-local coordinates:
   // The reference point is at (0,0) and the x axis points to our yaw angle.
@@ -1448,7 +1681,9 @@ void FSM::createXYFromSpline(double trg_v, double d,  Movement & prev_m, vector<
 {
   // TODO: for now overriding to the previous trg_speed of the FSM
   //trg_v = prev_trg_speed_;
-  if (DEBUG) std::cout << "Target speed for Spline: " << trg_v << std::endl;
+  auto init_sd = getFrenet(prev_m.x, prev_m.y, prev_m.yaw, map_.x, map_.y);
+  bool changingLane = fabs(init_sd[1] - d) > 3 and !ft.size();
+  if (DEBUG) std::cout << "Target speed for Spline: " << trg_v << " changing lane: " << changingLane << std::endl;
 
   size_t sz = next_x_vals_.size();
 
@@ -1471,10 +1706,12 @@ void FSM::createXYFromSpline(double trg_v, double d,  Movement & prev_m, vector<
     double x_point = x_add_on +  trg_x / N;
     // Translate forward trajectory to car local coords, if present
     if (cti < ft.size()) {
-      TrajNode & tn = ft[cti++];
+      TrajNode & tn = ft[cti];
       auto car_xy = translateToCarCoords(tn.x, tn.y, ref_yaw, ref_x, ref_y);
       x_point = car_xy[0];
-    }
+    }; //else if (x_point >= trg_x) break;
+    ++cti;
+
     double y_point = (*spl)(x_point);
     auto world_xy = translateToWorldCoords(x_point, y_point, ref_yaw, ref_x, ref_y);
     x_add_on = x_point;
@@ -1510,6 +1747,7 @@ void FSM::createXYFromSpline(double trg_v, double d,  Movement & prev_m, vector<
           " keep_speed: 1" << std::endl;
     }
     prev_m = m;
+//    if (changingLane and isZero(cur_sd[1] - d)) break;
   }
 }
 
@@ -1534,6 +1772,7 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
 
   size_t i = next_x_vals_.size();
 
+//  if (prev_pol_ != CHANGE_LANE or keep_speed) {
   if (true or keep_speed) {
 //    auto m = getLastPlannedMovement();
     createXYFromSpline(prev_trg_speed_, prev_d, prev_m, forward_traj, cur_traj_idx);
@@ -1542,7 +1781,7 @@ void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, siz
 
   if (DEBUG) {
     printPositionData("ApplyTrajectory", p);
-    std::cout << "cur_traj_idx: " << cur_traj_idx << " out of " << forward_traj.size() << std::endl;
+    std::cout << "cur_traj_idx: " << cur_traj_idx << " out of " << (forward_traj.size() -1) << std::endl;
   }
 
   double time = 0;
@@ -1747,17 +1986,15 @@ void FSM::update(Context & cxt)
     SensorData sd = checkLanes(p);
     // Check if our policy is changed and we need to change lane
     if (sd.pol == CHANGE_LANE) {
-      pol = CHANGE_LANE;
+//      pol = CHANGE_LANE;
       delete state_;
       state_ = new ChangeLane(*this, sd.v, &sd);
-      prev_pol_ = pol;
       return;
     // Otherwise, check if our speed target has changed
     } else if (state_->getTargetSpeed() - sd.v > 0.1 or state_->getTargetSpeed() - sd.v < -0.1) {
-      pol = MATCH_SPEED;
+//      pol = MATCH_SPEED;
       delete state_;
       state_ = new MatchSpeed(*this, sd.v, &sd);
-      prev_pol_ = pol;
       return;
     // If we just now changed to KEEP_LANE, change the state
     } else if (pol == KEEP_LANE and prev_pol_ != pol) {

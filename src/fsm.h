@@ -21,7 +21,7 @@ static constexpr double MAX_S           = 6945.554; // Max S (length) of our tra
 static constexpr double MAX_SPEED_MAR   = 0.95;     // MAX_SPEED margin factor
 static constexpr double LANE_WIDTH      = 4;        // Lane width in meters
 static constexpr double FRONT_CAR_MAR   = 10;       // Safety margin from the front car (m)
-static constexpr double LANE_CHANGE_MAR = 7;        // Absolute margin for lane change
+static constexpr double LANE_CHANGE_MAR = 10;        // Absolute margin for lane change
 static constexpr double LANE_CHANGE_FCT = LANE_WIDTH / 0.1; // Factor for computing the time to change lanes
 static constexpr double SENSOR_MAX_DIST = 30;       // Maxmum distance to look ahead for sensor data
 static constexpr double STARTING_LANE   = 6;        // Starting lane. 2: left, 6: middle, 10: right
@@ -149,6 +149,8 @@ public:
     Policy nextPolicy() override;
     TrajData computeTargetPos(PositionData & p, SensorData * sd) override;
     void computeTrajectory(TrajData & td) override;
+private:
+    void computeChange(PositionData & p, SensorData * sd);
 };
 
 class MatchSpeed : public State {
