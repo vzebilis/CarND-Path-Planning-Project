@@ -13,18 +13,23 @@
 static constexpr bool   DEBUG           = true;
 static constexpr double MPH2MPS         = 0.44704;  // MPH to m/s
 static constexpr double TIME_RES        = 0.02;     // Time resolution in sec
-static constexpr int    TRAJ_STEPS      = 50;       // trajectory steps
+static constexpr int    TRAJ_STEPS      = 50;       // trajectory steps to generate each time
 static constexpr double MAX_SPEED       = 50 * MPH2MPS; // specified in MPH, converted to m/sec
-static constexpr double MAX_ACC         = 0.95 * 10;       // in m/sec^2
+static constexpr double MAX_ACC         = 0.95 * 10;// in m/sec^2
 static constexpr double MAX_JERK        = 10;       // Max jerk in m/sec^3
 static constexpr double MAX_S           = 6945.554; // Max S (length) of our track
-static constexpr double MAX_SPEED_MAR   = 0.95;     // MAX_SPEED margin factor
+static constexpr double MAX_SPEED_MAR   = 0.98;     // MAX_SPEED margin factor
+static constexpr double FRONT_CAR_MAR   = 10;       // Safety margin in meters from the front car
+static constexpr double LANE_CHANGE_MAR = 7;        // Absolute margin in meters for lane change
+static constexpr double SENSOR_MAX_DIST = 30;       // Maximum distance to look ahead for sensor data
+
 static constexpr double LANE_WIDTH      = 4;        // Lane width in meters
-static constexpr double FRONT_CAR_MAR   = 10;       // Safety margin from the front car (m)
-static constexpr double LANE_CHANGE_MAR = 10;        // Absolute margin for lane change
-static constexpr double LANE_CHANGE_FCT = LANE_WIDTH / 0.1; // Factor for computing the time to change lanes
-static constexpr double SENSOR_MAX_DIST = 30;       // Maxmum distance to look ahead for sensor data
-static constexpr double STARTING_LANE   = 6;        // Starting lane. 2: left, 6: middle, 10: right
+static constexpr double LANE_CHANGE_FCT = 40;       // Factor for computing the time to do lane changing
+static constexpr double HALF_LANE_WIDTH = LANE_WIDTH / 2;
+static constexpr double LEFT_LANE_D     = HALF_LANE_WIDTH;
+static constexpr double CENTER_LANE_D   = HALF_LANE_WIDTH + LANE_WIDTH;
+static constexpr double RIGHT_LANE_D    = HALF_LANE_WIDTH + 2 * LANE_WIDTH;
+static constexpr double STARTING_LANE   = CENTER_LANE_D; // Starting lane
 
 typedef struct {
   std::vector<double> x;
@@ -53,8 +58,6 @@ typedef struct {
   double y;
   double s;
   double d;
-  double v;
-  double a;
 } PositionData;
 
 typedef struct {
@@ -77,29 +80,15 @@ typedef struct {
 } SplineData;
 
 typedef struct {
-  double init_s;
-  double init_d;
-  double init_speed;
-  double init_acc;
-  double final_s;
-  double final_d;
-  double final_speed;
-  double final_acc;
-  double time;
-} TrajData;
-
-typedef struct {
   double x;
   double y;
-  double s;
-  double d;
 } TrajNode;
 
 typedef enum { KEEP_LANE, MATCH_SPEED, CHANGE_LANE } Policy;
 typedef enum { CENTER, RIGHT, LEFT } Lane;
 
 typedef struct {
-  Policy pol;
+  Policy policy;
   int    id;
   double x;
   double y;
@@ -116,7 +105,6 @@ class FSM;
 class State {
 protected:
     FSM &                 fsm_;
-    PositionData          p_;
     double                trg_speed_;
     size_t                cur_traj_idx_;
     std::vector<TrajNode> forward_traj_;
@@ -125,74 +113,50 @@ public:
       trg_speed_ = fmin(trg_speed_, MAX_SPEED * MAX_SPEED_MAR);
     }
     virtual ~State() {}
-    virtual void update() = 0;
     virtual Policy nextPolicy() = 0;
-    virtual TrajData computeTargetPos(PositionData & p, SensorData * sd) { return {}; }
-    virtual void computeTrajectory(TrajData & td);
-    virtual void matchTargetSpeed(double d, double trg_v);
     // NON-VIRTUAL
-    void computeXYTrajectory(TrajData & td);
+    void update();
     double getTargetSpeed() const { return trg_speed_; }
 };
 
 class KeepLane : public State {
 public:
     using State::State; // using base ctor
-    void update() override;
     Policy nextPolicy() override { return KEEP_LANE; }
 };
 
 class ChangeLane : public State {
 public:
     ChangeLane(FSM & fsm, double trg_speed, SensorData * sd);
-    void update() override;
     Policy nextPolicy() override;
-    TrajData computeTargetPos(PositionData & p, SensorData * sd) override;
-    void computeTrajectory(TrajData & td) override;
-private:
-    void computeChange(PositionData & p, SensorData * sd);
 };
 
 class MatchSpeed : public State {
 public:
     MatchSpeed(FSM & fsm, double trg_speed, SensorData * sd);
-    void update() override;
     Policy nextPolicy() override;
-    TrajData computeTargetPos(PositionData & p, SensorData * sd) override;
+    void matchTargetSpeed(double trg_v);
 };
 
 class FSM {
 public:
   State *               state_;
-  bool                  first_time_;
   Context *             cxt_;
-  Policy                prev_pol_;
+  Policy                cur_policy_;
   Lane                  lane_;
 
   const Map &           map_;
-  SplineData            spd_;
 
-  std::vector<double>   prev_acc_;
-  std::vector<double>   prev_speed_;
   std::vector<double>   next_x_vals_;
   std::vector<double>   next_y_vals_;
   std::vector<double>   next_s_vals_;
   std::vector<double>   next_d_vals_;
-  double                prev_trg_speed_;
-  // How much delta_speed will we shed when decelerating from MAX_ACC to 0?
-  double                delta_speed_to_zero_acc_;
+  double                cur_trg_speed_;
+  bool                  first_time_;
 
-  void generateFullSplines();
-  void matchCarSpeed(double init_s, double init_d, double final_s, double final_d, double final_v);
   tk::spline * createLocalSpline(double d, const Movement & prev_m, double & ref_x, double & ref_y, double & ref_yaw);
-  void createXYFromSpline(double trg_v, double d, Movement & prev_m, std::vector<TrajNode> & ft, size_t & cti);
-  void computeNextXY(double start_x, double step_x, tk::spline & spl,
-      double ref_yaw, double ref_x, double ref_y);
-  SplineData * getShortSplines(TrajData & td);
-  std::vector<double> getXYfromSpline(double s, double d_offset);
-  TrajData computeMatchTargetSpeed(double init_s, double init_d, double init_speed, double init_acc,
-                                   double final_d, double trg_speed);
-  bool canChangeLane(const PositionData & p, SensorData & ahead, SensorData & behind);
+  void createXYFromSpline(double d, std::vector<TrajNode> & ft, size_t & cti);
+  bool canChangeLane(SensorData & ahead, SensorData & behind);
   SensorData checkLanes(const PositionData & p);
   void updateLane(double d);
   void handleFirstTime();
@@ -202,7 +166,6 @@ public:
   void update(Context & cxt);
   void clearProcessed();
   void clearAll() {
-      prev_acc_.clear(); prev_speed_.clear();
       next_x_vals_.clear(); next_y_vals_.clear();
       next_s_vals_.clear(); next_d_vals_.clear();
   }
