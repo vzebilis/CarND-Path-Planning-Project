@@ -71,15 +71,6 @@ typedef struct {
 } Movement;
 
 typedef struct {
-  tk::spline x;
-  tk::spline y;
-  tk::spline dx;
-  tk::spline dy;
-  tk::spline s;
-  tk::spline d;
-} SplineData;
-
-typedef struct {
   double x;
   double y;
 } TrajNode;
@@ -165,14 +156,9 @@ public:
   FSM(const Map & map);
   void update(Context & cxt);
   void clearProcessed();
-  void clearAll() {
-      next_x_vals_.clear(); next_y_vals_.clear();
-      next_s_vals_.clear(); next_d_vals_.clear();
-  }
   Movement getLastPlannedMovement();
   PositionData getLastProcessed() const;
   PositionData getMostRecentNotProcessed() const;
-  void incrementByProcessed(size_t & val) const;
   void applyTrajectory(PositionData & p, std::vector<TrajNode> & forward_traj, size_t & cur_traj_idx);
   std::pair<std::vector<double>, std::vector<double>> getNextXYVals() { return {next_x_vals_, next_y_vals_}; }
 };

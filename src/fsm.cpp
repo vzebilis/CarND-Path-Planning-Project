@@ -6,8 +6,6 @@
 using nlohmann::json;
 using std::string;
 using std::vector;
-using Eigen::MatrixXd;
-using Eigen::VectorXd;
 
 
 /**
@@ -64,7 +62,10 @@ static std::vector<double> translateToWorldCoords(double x, double y, double ref
   return {x, y};
 }
 
-
+/**
+ * Constructor for the FSM
+ * @param map The Map structure containing the waypoint world maps of the track
+ */
 FSM::FSM(const Map & map) : 
   state_(nullptr), cxt_(nullptr), cur_policy_(KEEP_LANE), map_(map),
   cur_trg_speed_(0), first_time_(true)
@@ -79,7 +80,6 @@ FSM::FSM(const Map & map) :
 
 /**
  * Method to compute proper steps to match a given speed, without violating any constraints
- * @param d The car d coordinate
  * @param trg_v The target speed
  */
 void MatchSpeed::matchTargetSpeed(double trg_v)
@@ -185,9 +185,14 @@ void MatchSpeed::matchTargetSpeed(double trg_v)
 
 
 
-//
-// Function to return the closest car ahead or behind, in the lane defined by d_offset
-//
+/**
+ * Function to return the closest car ahead or behind, in the lane defined by d_offset
+ * @param p The most recently planned position data.
+ * @param cxt The context containing the sensor fusion data
+ * @param ahead Whether we should be looking for cars ahead of us (True) or behind us (False)
+ * @param d_offset The offset in D we should be looking at, relative to current position (typically -4, 0 or +4)
+ * @return The sensor data containing information concerning the closest car ahead/behind in the request d_offset lane
+ */
 static SensorData getSensorFusion(const PositionData & p, Context & cxt, bool ahead, double d_offset)
 {
   // If we are looking at the side lanes, look a bit further ahead (not behind!)
@@ -243,7 +248,12 @@ static SensorData getSensorFusion(const PositionData & p, Context & cxt, bool ah
   return sd;
 }
 
-// Function that decides whether we can change lane, based on cars ahead and behind
+/**
+ * Function that decides whether we can change lane, based on cars ahead and behind
+ * @param ahead The sensor data of the closest car ahead of us
+ * @param behind The sensor data of the closest car behind us
+ * @return True if we can change lane, False otherwise
+ */
 bool FSM::canChangeLane(SensorData & ahead, SensorData & behind)
 {
   double time_before_change = cxt_->path_x.size() * TIME_RES;
@@ -268,6 +278,7 @@ bool FSM::canChangeLane(SensorData & ahead, SensorData & behind)
 /**
  * Helper function for printing out the current lane
  * @param lane The lane to print
+ * @return lane string to print
  */
 static std::string printLane(Lane lane)
 {
@@ -287,6 +298,7 @@ static std::string printLane(Lane lane)
 /**
  * Helper function for printing the current Policy
  * @param policy The policy to print
+ * @return policy string to print
  */
 static std::string printPolicy(Policy policy)
 {
@@ -303,9 +315,11 @@ static std::string printPolicy(Policy policy)
   return "";
 }
 
-//
-// Function to check which of the available lanes is best to use
-//
+/**
+ * Function to check which of the available lanes is best to use
+ * @param p The most recently planned position data (end of path_x/y or next_x/y_vals) vectors
+ * @return The sensor data to use to determine which state to switch to. (if sd.s == -1 then there is no car present)
+ */
 SensorData FSM::checkLanes(const PositionData & p)
 {
   if (DEBUG) std::cout << "checkLanes: current lane: " << printLane(lane_) << std::endl;
@@ -376,9 +390,10 @@ SensorData FSM::checkLanes(const PositionData & p)
   return best;
 }
 
-//
-// Method to update the internal lane state
-//
+/**
+ * Method to update the internal lane state
+ * @param d The new D value of the current position
+ */
 void FSM::updateLane(double d)
 {
   assert(d >= 0 and d <= 3 * LANE_WIDTH);
@@ -387,9 +402,9 @@ void FSM::updateLane(double d)
   else if (d >= 2 * LANE_WIDTH) lane_ = RIGHT;
 }
 
-//
-// Update method to be called for every update of the FSM
-//
+/**
+ * Update method to be called for every update of the FSM
+ */
 void State::update()
 {
   auto p = fsm_.getMostRecentNotProcessed();
@@ -399,9 +414,12 @@ void State::update()
   fsm_.applyTrajectory(p, forward_traj_, cur_traj_idx_);
 }
 
-//
-// Change Lane STATE
-//
+/**
+ * Change Lane STATE
+ * @param fsm The FSM object
+ * @param trg_speed The target speed to use
+ * @param sd The sensor data for any car we detected, or at least one showing the lane to change to (should not be null)
+ */
 ChangeLane::ChangeLane(FSM & fsm, double trg_speed, SensorData * sd) : State(fsm, trg_speed)
 {
   if (DEBUG) std::cout << "ChangeLane: creating new State\n";
@@ -413,9 +431,10 @@ ChangeLane::ChangeLane(FSM & fsm, double trg_speed, SensorData * sd) : State(fsm
   fsm_.applyTrajectory(p, forward_traj_, cur_traj_idx_);
 }
 
-//
-// Method determining next policy
-//
+/**
+ * Method determining next policy
+ * @return the next policy to follow
+ */
 Policy ChangeLane::nextPolicy()
 {
   if (cur_traj_idx_ >= forward_traj_.size() + 2 * TRAJ_STEPS) {
@@ -426,9 +445,12 @@ Policy ChangeLane::nextPolicy()
   return CHANGE_LANE;
 }
 
-//
-// Match Speed STATE
-//
+/**
+ * Match Speed STATE
+ * @param fsm The FSM object
+ * @param trg_speed The target speed to match
+ * @param sd Optionally the sensor data for any car we detected (nullptr otherwise)
+ */
 MatchSpeed::MatchSpeed(FSM & fsm, double trg_speed, SensorData * sd) : State(fsm, trg_speed)
 {
   if (DEBUG) std::cout << "MatchSpeed: creating new State\n";
@@ -441,9 +463,10 @@ MatchSpeed::MatchSpeed(FSM & fsm, double trg_speed, SensorData * sd) : State(fsm
   fsm_.applyTrajectory(p, forward_traj_, cur_traj_idx_);
 }
 
-//
-// Method determining next policy
-//
+/**
+ * Method determining next policy
+ * @return the next policy to follow
+ */
 Policy MatchSpeed::nextPolicy()
 {
   if (cur_traj_idx_ >= forward_traj_.size() + 2 * TRAJ_STEPS) {
@@ -460,13 +483,6 @@ Policy MatchSpeed::nextPolicy()
 // FSM implementation
 //
 //
-void FSM::incrementByProcessed(size_t & val) const
-{
-  if (first_time_) return;
-  size_t processed = TRAJ_STEPS - cxt_->path_x.size();
-  assert(processed > 0 and processed <= TRAJ_STEPS);
-  val += processed;
-}
 
 /**
  * Method to get the last movement that was planned
@@ -508,90 +524,6 @@ Movement FSM::getLastPlannedMovement()
   return m;
 }
 
-
-/**
- * Helper function to limit the proposed movement so that no constraint violations happen
- * @param m Proposed movement
- * @param prev_m Previous movement
- * @param trg_v Target velocity to use as a constraint
- * @return True if there was an limiting update, False otherwise
- */
-//static bool updateLimitMovement(Movement & m, const Movement & prev_m, double trg_v)
-//{
-//  double & cur_vx = m.vx; //prev_speed * cos(yaw);
-//  double & cur_vy = m.vy; //prev_speed * sin(yaw);
-//  double & cur_ax = m.ax; //cur_vx - prev_vx;
-//  double & cur_ay = m.ay; //cur_vy - prev_vy;
-//  double prev_vx = prev_m.vx;
-//  double prev_vy = prev_m.vy;
-//  double prev_ax = prev_m.ax;
-//  double prev_ay = prev_m.ay;
-//
-//  double lim_v = trg_v;
-//  double lim_a = MAX_ACC;
-//  double lim_j = MAX_JERK;
-//
-//  bool updated = false;
-//
-//  //
-//  // Limit velocity to the target one
-//  //
-//  double tot_v = sqrt(pow(cur_vx, 2) + pow(cur_vy, 2));
-//  if (tot_v > lim_v) {
-//    updated = true;
-//    if (DEBUG) std::cout << "limiting speed " << tot_v;
-//    tot_v = lim_v;
-//    cur_vx = tot_v * cos(prev_m.yaw) * (cur_vx > 0? 1: -1);
-//    cur_vy = tot_v * sin(prev_m.yaw) * (cur_vy > 0? 1: -1);
-//    if (DEBUG) std::cout << " tot_v: " << tot_v << " cur_vx: " << cur_vx << " cur_vy: " << cur_vy << std::endl;
-//    cur_ax = (cur_vx - prev_vx) / TIME_RES;
-//    cur_ay = (cur_vy - prev_vy) / TIME_RES;
-//  }
-//  //double tot_a = tot_v - prev_tot_v;
-//
-//  //
-//  // Limit acceleration to +/- max one and update velocity accordingly
-//  //
-//  double tot_a = sqrt(pow(cur_ax, 2) + pow(cur_ay, 2));
-//  if (tot_a > lim_a or tot_a < -lim_a) {
-//    updated = true;
-//    if (DEBUG) std::cout << "limiting acceleration " << tot_a;
-//    tot_a = (tot_a > 0)? lim_a: -lim_a;
-//    cur_ax = tot_a * cos(prev_m.yaw) * (cur_ax > 0? 1: -1);
-//    cur_ay = tot_a * sin(prev_m.yaw) * (cur_ay > 0? 1: -1);
-//    if (DEBUG) std::cout << " tot_a: " << tot_a << " cur_ax: " << cur_ax << " cur_ay: " << cur_ay << std::endl;
-//    cur_vx = prev_vx + cur_ax * TIME_RES;
-//    cur_vy = prev_vy + cur_ay * TIME_RES;
-//  }
-//
-//  //
-//  // Limit jerk to +/- max one and update acceleration and velocity accordingly
-//  //
-//  double cur_jx = (cur_ax - prev_ax) / TIME_RES;
-//  double cur_jy = (cur_ay - prev_ay) / TIME_RES;
-//  //double tot_j = tot_a - prev_tot_a;
-//  double tot_j = sqrt(pow(cur_jx, 2) + pow(cur_jy, 2));
-//  if (tot_j > lim_j or tot_j < -lim_j) {
-//    updated = true;
-//    if (DEBUG) std::cout << "limiting jerk " << tot_j;
-//    tot_j = (tot_j > 0)? lim_j: -lim_j;
-//    cur_jx = tot_j * cos(prev_m.yaw) * (cur_jx > 0? 1: -1);
-//    cur_jy = tot_j * sin(prev_m.yaw) * (cur_jy > 0? 1: -1);
-//    if (DEBUG) std::cout << " tot_j: " << tot_j << " cur_jx: " << cur_jx << " cur_jy: " << cur_jy << std::endl;
-//    cur_ax = prev_ax + cur_jx * TIME_RES;
-//    cur_ay = prev_ay + cur_jy * TIME_RES;
-//    cur_vx = prev_vx + cur_ax * TIME_RES;
-//    cur_vy = prev_vy + cur_ay * TIME_RES;
-//  }
-//  // Update the movement X, Y coords if VX and VY actually changed
-//  if (updated) {
-//    m.x = prev_m.x + m.vx * TIME_RES;
-//    m.y = prev_m.y + m.vy * TIME_RES;
-//  }
-//
-//  return updated;
-//}
-
 /**
  * Method to generate a spline based on current position, previous couple ones,
  * and certain points on the road ahead, spaced by 30 meters
@@ -631,19 +563,17 @@ tk::spline * FSM::createLocalSpline(double d, const Movement & prev_m,
   auto cur_sd = getFrenet(ref_x, ref_y, ref_yaw, map_.x, map_.y);
   double cur_d = cur_sd[1];
 
-  double d0, d1, d2, d3;
-  d0 = d1 = d2 = d3 = d;
+  double d1, d2, d3;
+  d1 = d2 = d3 = d;
   double s1, s2 , s3;
   // Just picking some waypoints further ahead
   s1 = cur_sd[0] + 30;
   s2 = s1 + 30;
   s3 = s2 + 30;
   // Now we will add some more points further away
-//  auto next_wp0 = getXY(cur_sd[0] + 15, d0, map_.s, map_.x, map_.y);
   auto next_wp1 = getXY(s1, d1, map_.s, map_.x, map_.y);
   auto next_wp2 = getXY(s2, d2, map_.s, map_.x, map_.y);
   auto next_wp3 = getXY(s3, d3, map_.s, map_.x, map_.y);
-//  xs.push_back(next_wp0[0]); ys.push_back(next_wp0[1]);
   xs.push_back(next_wp1[0]); ys.push_back(next_wp1[1]);
   xs.push_back(next_wp2[0]); ys.push_back(next_wp2[1]);
   xs.push_back(next_wp3[0]); ys.push_back(next_wp3[1]);
@@ -664,8 +594,9 @@ tk::spline * FSM::createLocalSpline(double d, const Movement & prev_m,
 
 /**
  * Method to populate the future X,Y trajectory based on a Spline interpolation
- * @param trg_v Traget speed
  * @param d Current d Frenet value
+ * @param ft The forward trajectory, if one is computed (empty otherwise)
+ * @param cti The current trajectory index. Will be incremented by the steps taken.
  */
 void FSM::createXYFromSpline(double d, vector<TrajNode> & ft, size_t & cti)
 {
@@ -705,8 +636,6 @@ void FSM::createXYFromSpline(double d, vector<TrajNode> & ft, size_t & cti)
     x_point = world_xy[0];
     y_point = world_xy[1];
 
-//    prev_m = getLastPlannedMovement();
-
     // Update cur_yaw
     cur_yaw = atan2(y_point - prev_y_point, x_point - prev_x_point);
     prev_x_point = x_point;
@@ -726,18 +655,21 @@ void FSM::createXYFromSpline(double d, vector<TrajNode> & ft, size_t & cti)
 }
 
 
-//
-// Method to apply the pre-computed trajectory
-//
+/**
+ * Method to apply the pre-computed trajectory or generate new one if one is not computed
+ * @param p The latest position data planned
+ * @param forward_traj The pre-computed forward trajectory
+ * @param cur_traj_idx The current position on the forward_traj trah=jectory
+ */
 void FSM::applyTrajectory(PositionData & p, vector<TrajNode> & forward_traj, size_t & cur_traj_idx)
 {
   updateLane(p.d);
   createXYFromSpline(p.d, forward_traj, cur_traj_idx);
 }
 
-//
-// Method to clear processed data from the FSM
-//
+/**
+ * Method to clear processed data from the FSM
+ */
 void FSM::clearProcessed()
 {
   if (first_time_) return; // No processed to clear during the first time we run
@@ -755,9 +687,10 @@ void FSM::clearProcessed()
   next_d_vals_.erase(next_d_vals_.begin(), next_d_vals_.begin() + processed);
 }
 
-//
-// Method to get the last data that was processed by the FSM (x,y,s,d,v,a)
-//
+/**
+ * Method to get the last data that was processed by the FSM (x,y,s,d)
+ * @return The last processed PositionData
+ */
 PositionData FSM::getLastProcessed() const
 {
   PositionData p;
@@ -776,9 +709,10 @@ PositionData FSM::getLastProcessed() const
   return p;
 }
 
-//
-// Method to get the most recent data that on the processing queue of the FSM (x,y,s,d,v,a)
-//
+/**
+ * Method to get the most recent data that on the processing queue of the FSM (x,y,s,d)
+ * @return The most recently planned position data
+ */
 PositionData FSM::getMostRecentNotProcessed() const
 {
   PositionData p;
@@ -795,9 +729,9 @@ PositionData FSM::getMostRecentNotProcessed() const
   return p;
 }
 
-//
-// Method to handle first time use. Will just accelerate to MAX_SPEED
-//
+/**
+ * Method to handle first time use. Will just accelerate to MAX_SPEED * MAX_SPEED_MAR
+ */
 void FSM::handleFirstTime()
 {
   assert(state_ == nullptr);
@@ -806,9 +740,10 @@ void FSM::handleFirstTime()
   first_time_ = false;
 }
 
-//
-// Main update function for the FSM based on new State
-//
+/**
+ * Main update function for the FSM based on new State
+ * @param cxt Context containing the latest data for the state of the car
+ */
 void FSM::update(Context & cxt) 
 {
   cxt_ = &cxt;
