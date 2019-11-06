@@ -208,7 +208,7 @@ static SensorData getSensorFusion(const PositionData & p, Context & cxt, bool ah
     if (car_d < p.d + d_offset - HALF_LANE_WIDTH or
         car_d > p.d + d_offset + HALF_LANE_WIDTH) continue;
 
-    double own_s  = p.s;
+    double own_s  = cxt.s;
     double car_s  = cxt.sensor_fusion[i][5]; // get the s value
 
     // Handle wraparound

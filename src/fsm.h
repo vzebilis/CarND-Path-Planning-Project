@@ -10,7 +10,7 @@
 // https://kluge.in-chemnitz.de/opensource/spline/
 #include "spline.h"
 
-static constexpr bool   DEBUG           = true;
+static constexpr bool   DEBUG           = false;
 static constexpr double MPH2MPS         = 0.44704;  // MPH to m/s
 static constexpr double TIME_RES        = 0.02;     // Time resolution in sec
 static constexpr int    TRAJ_STEPS      = 50;       // trajectory steps to generate each time
@@ -18,7 +18,7 @@ static constexpr double MAX_SPEED       = 50 * MPH2MPS; // specified in MPH, con
 static constexpr double MAX_ACC         = 0.95 * 10;// in m/sec^2
 static constexpr double MAX_JERK        = 10;       // Max jerk in m/sec^3
 static constexpr double MAX_S           = 6945.554; // Max S (length) of our track
-static constexpr double MAX_SPEED_MAR   = 0.98;     // MAX_SPEED margin factor
+static constexpr double MAX_SPEED_MAR   = 0.95;     // MAX_SPEED margin factor
 static constexpr double FRONT_CAR_MAR   = 10;       // Safety margin in meters from the front car
 static constexpr double LANE_CHANGE_MAR = 7;        // Absolute margin in meters for lane change
 static constexpr double SENSOR_MAX_DIST = 30;       // Maximum distance to look ahead for sensor data

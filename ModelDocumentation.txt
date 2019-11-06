@@ -1,0 +1,76 @@
+===============================================================================
+  Model Documentation for the Finite State Machine used in the:
+    Udacity CarND Path Planning Project
+  Author: Vasileios Zempilis  Date: November 5th 2019  (How about a bonfire?)
+===============================================================================
+
+- The approach chosen for this Path-Planning project was that of an FSM.
+  The reasoning behind that was that in a structured environment such as
+  driving in a highway setting, the car can predictably change between a
+  limited set of pre-defined states.
+
+- The types of states chosen here are:
+  - KEEP_LANE: When in this state the car just extrapolates it's trajectory
+               based on maintaining it's current speed and following the 
+               current lane.
+
+  - MATCH_SPEED: When in this state the car tries to smoothly accelerate or
+               decelerate to match the given speed, if that is greater or 
+               less than the current one, respectively. This is done in a
+               way that makes sure no jerk, acceleration or speed constraints
+               are violated.
+
+  - CHANGE_LANE: When in this state the car tries to smoothly change lanes to
+               the computed destination lane. The car always changes one lane
+               at a time, although the decesion to change lane again can happen
+               consecutively so that it seems that the car is changing more
+               than one lane in a single maneuver. All changes are happening
+               while taking into account jerk, acceleration and speed limits.
+
+IN DETAIL:
+------------
+
+- KEEP_LANE State:
+  The trajectory generation is based on a spline interpolation of the previous
+  and current position of the car and three positions predicted along the curve
+  of the road ahead, spread out by a large semi-random number (30 meters).
+  Since the purpose here is to maintain the current speed, we generate the 
+  future trajectory by just interpolating our x-axis based on a  linear
+  approximation of the curve ahead, in the way explained in the Q&A session
+  of the course.
+
+- MATCH_SPEED State:
+  We enter this state when we detect either:
+    - Open road in front of us, in which case we accelerate to MAX_SPEED, OR
+    - A car in the same lane in front, in which case we match it's speed
+  The trajectory generation for this state is more complex since we have a
+  given target speed which we need to reach from our current speed, without
+  violating any jerk or acceleration constraints. This is done by manually
+  computing the necessary steps to take to accelerate or decelerate 
+  accrodingly, in order to reach the given speed. Since at this point we do
+  not yet actively try to smooth the motion, the generated x/y points are
+  quite jerky. In order to apply the necessary smoothing we do a second
+  pass of the generated x points and instead of using the generated y ones,
+  we use a spline to generate them. This ensures a proper smooth motion,
+  while keeping the original x spacing we had computed that guaranteed that no
+  constraints are violated.
+
+- CHANGE_LANE State:
+  We enter this state when we detect either:
+    - One of the side lanes to our current one, will allow us to move faster OR
+    - If we are in a different lane than the CENTER one and we determine that
+      we can move equally fast in the CENTER one. This is done so that there is
+      a natural tendency to drive in the middle lane, which provides more
+      opportunities to overtake a car we might encounter ahead, since we would 
+      have the option to overtake either by using the left or right lanes.
+  The complexity of this state lies mostly in determining the best course of 
+  action, given the situation on the road ahead, the speed of the car in front
+  and the presence or not of cars in the side lanes, both ahead and behind us.
+  The decision to change lanes is based on the speed in the current lane versus
+  the speed in the side lanes, along with the space available in those side
+  lanes for us to do the lane change. The costing takes into account the delta
+  of our current speed and the side lane car speed to determine if by the time
+  we finish our maneuver we will still have the necessary safety margin or not.
+  The trajectory generation is happening again through a spline interpolation,
+  almost identical with the KEEP_LANE one, except that the D offset for the 
+  positions used for interpolating further ahead is the new target one.
